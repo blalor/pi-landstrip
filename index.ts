@@ -10,6 +10,8 @@ import type {
   ExtensionContext,
 } from '@earendil-works/pi-coding-agent';
 
+import { binaryPath } from '@jarkkojs/landstrip';
+
 import { spawn, spawnSync } from 'node:child_process';
 import {
   existsSync,
@@ -50,16 +52,10 @@ interface SandboxNetworkConfig {
   deniedDomains: string[];
 }
 
-interface LandstripConfig {
-  command: string;
-  debug: boolean;
-}
-
 interface SandboxConfig {
   enabled: boolean;
   network: SandboxNetworkConfig;
   filesystem: SandboxFilesystemConfig;
-  landstrip: LandstripConfig;
 }
 
 interface LandstripPolicy {
@@ -72,7 +68,16 @@ interface LandstripPolicy {
   filesystem: SandboxFilesystemConfig;
 }
 
-const LANDSTRIP_VERSION = [0, 8, 3] as const;
+interface LandstripErrorResponse {
+  category: 'policy' | 'tool' | 'platform' | 'system';
+  file?: string;
+  program?: string;
+  target?: 'filesystem' | 'network' | 'platform';
+  kind?: 'launch' | 'encoding';
+  message: string;
+}
+
+const LANDSTRIP_VERSION = [0, 9, 2] as const;
 const SUPPORTED_PLATFORMS = new Set<NodeJS.Platform>(['linux', 'darwin', 'win32']);
 
 const DEFAULT_CONFIG: SandboxConfig = {
@@ -103,10 +108,6 @@ const DEFAULT_CONFIG: SandboxConfig = {
     allowRead: ['.', '~/.config', '~/.gitconfig', '~/.local', '~/.cargo'],
     allowWrite: ['.', '/tmp'],
     denyWrite: ['.env', '.env.*', '*.pem', '*.key'],
-  },
-  landstrip: {
-    command: 'landstrip',
-    debug: false,
   },
 };
 
@@ -175,10 +176,6 @@ function deepMerge(base: SandboxConfig, overrides: Partial<SandboxConfig>): Sand
     filesystem: {
       ...base.filesystem,
       ...overrides.filesystem,
-    },
-    landstrip: {
-      ...base.landstrip,
-      ...overrides.landstrip,
     },
   };
 }
@@ -344,6 +341,52 @@ function extractBlockedWritePath(output: string, cwd: string): string | null {
   return match ? normalizeBlockedPath(match[1], cwd) : null;
 }
 
+function parseLandstripErrors(output: string): LandstripErrorResponse[] {
+  const errors: LandstripErrorResponse[] = [];
+
+  for (const line of output.split('\n')) {
+    try {
+      const parsed = JSON.parse(line);
+
+      if (
+        typeof parsed === 'object' &&
+        parsed !== null &&
+        typeof parsed.category === 'string' &&
+        ['policy', 'tool', 'platform', 'system'].includes(parsed.category) &&
+        typeof parsed.message === 'string' &&
+        parsed.message.length > 0
+      ) {
+        errors.push(parsed as LandstripErrorResponse);
+      }
+    } catch {
+      // ignore non-JSON lines
+    }
+  }
+
+  return errors;
+}
+
+function formatLandstripErrors(errors: LandstripErrorResponse[]): string {
+  return errors
+    .map((err) => {
+      const parts: string[] = [`landstrip: ${err.category}`];
+
+      if (err.target) {
+        parts.push(`(${err.target})`);
+      }
+      if (err.program) {
+        parts.push(` ${err.program}`);
+      }
+      if (err.kind) {
+        parts.push(`:${err.kind}`);
+      }
+      parts.push(`: ${err.message}`);
+
+      return parts.join('');
+    })
+    .join('\n');
+}
+
 async function showPermissionPrompt(
   ctx: ExtensionContext,
   title: string,
@@ -472,8 +515,8 @@ function promptWriteBlock(ctx: ExtensionContext, filePath: string): Promise<Perm
   );
 }
 
-function landstripVersion(command: string): string | null {
-  const result = spawnSync(command, ['--version'], { encoding: 'utf-8' });
+function landstripVersion(): string | null {
+  const result = spawnSync(binaryPath(), ['--version'], { encoding: 'utf-8' });
   if (result.status !== 0) return null;
   return result.stdout.trim();
 }
@@ -790,18 +833,10 @@ export default function (pi: ExtensionAPI) {
       async exec(command, cwd, { onData, signal, timeout, env }) {
         if (!existsSync(cwd)) throw new Error(`Working directory does not exist: ${cwd}`);
 
-        const config = loadConfig(cwd);
         const { shell, args } = getShellConfig(userShellPath);
         const proxy = await startProxy(ctx, cwd);
         const policy = writePolicyFile(cwd, proxy.port);
-        const landstripArgs = [
-          ...(config.landstrip.debug ? ['--debug'] : []),
-          '-p',
-          policy.path,
-          shell,
-          ...args,
-          command,
-        ];
+        const landstripArgs = ['-p', policy.path, shell, ...args, command];
 
         return new Promise((resolvePromise, reject) => {
           let timeoutHandle: NodeJS.Timeout | undefined;
@@ -817,7 +852,7 @@ export default function (pi: ExtensionAPI) {
             rmSync(policy.dir, { recursive: true, force: true });
           };
 
-          const child = spawn(config.landstrip.command, landstripArgs, {
+          const child = spawn(binaryPath(), landstripArgs, {
             cwd,
             env: proxyEnv(env, proxy.port),
             detached: true,
@@ -886,6 +921,11 @@ export default function (pi: ExtensionAPI) {
       .filter((content) => content.type === 'text')
       .map((content) => content.text)
       .join('\n');
+    const landstripErrors = parseLandstripErrors(outputText);
+    if (landstripErrors.length > 0) {
+      const message = formatLandstripErrors(landstripErrors);
+      result.content.unshift({ type: 'text', text: `\n${message}\n` });
+    }
     const blockedPath = extractBlockedWritePath(outputText, ctx.cwd);
 
     if (!blockedPath || !ctx.hasUI) return result;
@@ -956,18 +996,21 @@ export default function (pi: ExtensionAPI) {
       return false;
     }
 
-    const version = landstripVersion(config.landstrip.command);
+    const version = landstripVersion();
     if (!version) {
       sandboxEnabled = false;
       sandboxReady = false;
-      ctx.ui.notify(`landstrip was not found. Install it with: cargo install landstrip`, 'error');
+      ctx.ui.notify(
+        `landstrip was not found. Reinstall with: npm install @jarkkojs/landstrip`,
+        'error',
+      );
       return false;
     }
 
     if (!hasMinimumVersion(version, LANDSTRIP_VERSION)) {
       sandboxEnabled = false;
       sandboxReady = false;
-      ctx.ui.notify(`landstrip 0.8.3 or newer is required; found: ${version}`, 'error');
+      ctx.ui.notify(`landstrip 0.9.2 or newer is required; found: ${version}`, 'error');
       return false;
     }
 
@@ -1127,7 +1170,7 @@ export default function (pi: ExtensionAPI) {
         'Sandbox Configuration',
         `  Project config: ${projectPath}`,
         `  Global config:  ${globalPath}`,
-        `  landstrip:      ${config.landstrip.command}`,
+        `  landstrip:      ${binaryPath()}`,
         '',
         'Network (bash through HTTP proxy):',
         `  Allowed domains: ${config.network.allowedDomains.join(', ') || '(none)'}`,

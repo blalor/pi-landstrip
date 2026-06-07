@@ -3,22 +3,16 @@
 Landlock-based sandboxing for [pi](https://pi.dev/) using
 [`landstrip`](https://github.com/jarkkojs/landstrip).
 
-## Prerequisites
-
-Install `landstrip` and make sure it is on the `PATH` used to launch pi:
-
-```bash
-cargo install landstrip
-```
-
-`landstrip` supports Linux, macOS, and Windows. On other platforms this extension loads
-but leaves sandboxing disabled.
-
 ## Install
 
 ```bash
 pi install npm:pi-landstrip
 ```
+
+This installs `pi-landstrip` and its `@jarkkojs/landstrip` dependency, which
+includes platform-specific native binaries for Linux, macOS, and Windows.
+
+On unsupported platforms the extension loads but leaves sandboxing disabled.
 
 ## Configure
 
