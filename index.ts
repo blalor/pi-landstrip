@@ -1,6 +1,8 @@
 // SPDX-License-Identifier: MIT
 // Copyright (C) Jarkko Sakkinen 2026
 
+/// <reference path="./landstrip.d.ts" />
+
 import type {
   AgentToolResult,
   AgentToolUpdateCallback,
@@ -593,16 +595,33 @@ function pipeSockets(client: Socket, upstream: Socket, initialData?: Buffer): vo
   upstream.pipe(client);
 }
 
-export default function (pi: ExtensionAPI) {
-  pi.registerFlag('no-sandbox', {
-    description: 'Disable landstrip sandboxing for bash commands',
-    type: 'boolean',
-    default: false,
-  });
+type LandstripBashTool = ReturnType<typeof createBashToolDefinition>;
 
-  const localCwd = process.cwd();
-  const userShellPath = SettingsManager.create(localCwd).getShellPath();
-  const localBash = createBashToolDefinition(localCwd, { shellPath: userShellPath });
+export interface LandstripIntegrationOptions {
+  registerBashTool?: boolean;
+  cwd?: string;
+}
+
+export interface LandstripIntegration {
+  createBashTool(cwd: string, ctx?: ExtensionContext): LandstripBashTool;
+  register(pi: ExtensionAPI): void;
+}
+
+export default function (pi: ExtensionAPI) {
+  createLandstripIntegration().register(pi);
+}
+
+export function createLandstripIntegration(
+  options: LandstripIntegrationOptions = {},
+): LandstripIntegration {
+  const shouldRegisterBashTool = options.registerBashTool ?? true;
+  const localCwd = options.cwd ?? process.cwd();
+
+  function createPlainBashTool(cwd: string): LandstripBashTool {
+    return createBashToolDefinition(cwd, {
+      shellPath: SettingsManager.create(cwd).getShellPath(),
+    });
+  }
 
   let sandboxEnabled = false;
   let sandboxReady = false;
@@ -838,7 +857,7 @@ export default function (pi: ExtensionAPI) {
       async exec(command, cwd, { onData, signal, timeout, env }) {
         if (!existsSync(cwd)) throw new Error(`Working directory does not exist: ${cwd}`);
 
-        const { shell, args } = getShellConfig(userShellPath);
+        const { shell, args } = getShellConfig(SettingsManager.create(cwd).getShellPath());
         const proxy = await startProxy(ctx, cwd);
         const policy = writePolicyFile(cwd, proxy.port);
         const landstripArgs = ['-p', policy.path, shell, ...args, command];
@@ -919,11 +938,11 @@ export default function (pi: ExtensionAPI) {
     ctx: ExtensionContext,
   ): Promise<AgentToolResult<BashToolDetails | undefined>> {
     let landstripStderr = '';
-    const sandboxedBash = createBashToolDefinition(localCwd, {
+    const sandboxedBash = createBashToolDefinition(ctx.cwd, {
       operations: createLandstripBashOps(ctx, (data) => {
         landstripStderr += data.toString('utf8');
       }),
-      shellPath: userShellPath,
+      shellPath: SettingsManager.create(ctx.cwd).getShellPath(),
     });
 
     const run = () => sandboxedBash.execute(id, params, signal, onUpdate, ctx);
@@ -1041,178 +1060,201 @@ export default function (pi: ExtensionAPI) {
     return true;
   }
 
-  pi.registerTool({
-    ...localBash,
-    label: 'bash (landstrip)',
-    async execute(id, params, signal, onUpdate, ctx) {
-      if (!sandboxEnabled || !sandboxReady)
-        return localBash.execute(id, params, signal, onUpdate, ctx);
+  function createBashTool(cwd: string, ctx?: ExtensionContext): LandstripBashTool {
+    const localBash = createPlainBashTool(cwd);
 
-      return runBashWithOptionalRetry(id, params, signal, onUpdate, ctx);
-    },
-  });
+    return {
+      ...localBash,
+      label: 'bash (landstrip)',
+      async execute(id, params, signal, onUpdate, callCtx) {
+        const effectiveCtx = callCtx ?? ctx;
+        if (!sandboxEnabled || !sandboxReady || !effectiveCtx)
+          return localBash.execute(id, params, signal, onUpdate, effectiveCtx);
 
-  pi.on('user_bash', async (event, ctx) => {
-    if (!sandboxEnabled || !sandboxReady) return;
-    if (!loadConfig(ctx.cwd).enabled) return;
+        return runBashWithOptionalRetry(id, params, signal, onUpdate, effectiveCtx);
+      },
+    };
+  }
 
-    const blockedDomain = await preflightCommandDomains(event.command, ctx);
-    if (blockedDomain) {
-      return {
-        result: {
-          output: `Blocked: "${blockedDomain}" is not allowed by the sandbox. Use /sandbox to review your config.`,
-          exitCode: 1,
-          cancelled: false,
-          truncated: false,
-        },
-      };
-    }
+  function register(pi: ExtensionAPI): void {
+    const maybePi = pi as ExtensionAPI & {
+      getFlag?: (name: string) => unknown;
+      registerCommand?: ExtensionAPI['registerCommand'];
+      registerFlag?: ExtensionAPI['registerFlag'];
+    };
 
-    return { operations: createLandstripBashOps(ctx) };
-  });
+    maybePi.registerFlag?.('no-sandbox', {
+      description: 'Disable landstrip sandboxing for bash commands',
+      type: 'boolean',
+      default: false,
+    });
 
-  pi.on('tool_call', async (event, ctx) => {
-    if (!sandboxEnabled) return;
+    if (shouldRegisterBashTool) pi.registerTool(createBashTool(localCwd));
 
-    const config = loadConfig(ctx.cwd);
-    if (!config.enabled) return;
+    pi.on('user_bash', async (event, ctx) => {
+      if (!sandboxEnabled || !sandboxReady) return;
+      if (!loadConfig(ctx.cwd).enabled) return;
 
-    const { globalPath, projectPath } = getConfigPaths(ctx.cwd);
-
-    if (sandboxReady && isToolCallEventType('bash', event)) {
-      const blockedDomain = await preflightCommandDomains(event.input.command, ctx);
+      const blockedDomain = await preflightCommandDomains(event.command, ctx);
       if (blockedDomain) {
         return {
-          block: true,
-          reason: `Network access to "${blockedDomain}" is blocked by the sandbox.`,
-        };
-      }
-    }
-
-    if (isToolCallEventType('read', event)) {
-      const filePath = canonicalizePath(event.input.path);
-      if (!matchesPattern(filePath, getEffectiveAllowRead(ctx.cwd))) {
-        const choice = await promptReadBlock(ctx, filePath);
-        if (choice === 'abort') {
-          return {
-            block: true,
-            reason: `Sandbox: read access denied for "${filePath}"`,
-          };
-        }
-        await applyReadChoice(choice, filePath, ctx.cwd);
-      }
-    }
-
-    if (isToolCallEventType('write', event) || isToolCallEventType('edit', event)) {
-      const filePath = canonicalizePath((event.input as { path: string }).path);
-
-      if (matchesPattern(filePath, config.filesystem.denyWrite)) {
-        return {
-          block: true,
-          reason:
-            `Sandbox: write access denied for "${filePath}" (in denyWrite). ` +
-            `To change this, edit denyWrite in:\n  ${projectPath}\n  ${globalPath}`,
+          result: {
+            output: `Blocked: "${blockedDomain}" is not allowed by the sandbox. Use /sandbox to review your config.`,
+            exitCode: 1,
+            cancelled: false,
+            truncated: false,
+          },
         };
       }
 
-      if (shouldPromptForWrite(filePath, getEffectiveAllowWrite(ctx.cwd), matchesPattern)) {
-        const choice = await promptWriteBlock(ctx, filePath);
-        if (choice === 'abort') {
+      return { operations: createLandstripBashOps(ctx) };
+    });
+
+    pi.on('tool_call', async (event, ctx) => {
+      if (!sandboxEnabled) return;
+
+      const config = loadConfig(ctx.cwd);
+      if (!config.enabled) return;
+
+      const { globalPath, projectPath } = getConfigPaths(ctx.cwd);
+
+      if (sandboxReady && isToolCallEventType('bash', event)) {
+        const blockedDomain = await preflightCommandDomains(event.input.command, ctx);
+        if (blockedDomain) {
           return {
             block: true,
-            reason: `Sandbox: write access denied for "${filePath}" (not in allowWrite)`,
+            reason: `Network access to "${blockedDomain}" is blocked by the sandbox.`,
           };
         }
-        await applyWriteChoice(choice, filePath, ctx.cwd);
-      }
-    }
-  });
-
-  pi.on('session_start', async (_event, ctx) => {
-    const noSandbox = pi.getFlag('no-sandbox') as boolean;
-
-    if (noSandbox) {
-      sandboxEnabled = false;
-      sandboxReady = false;
-      ctx.ui.notify('Sandbox disabled via --no-sandbox', 'warning');
-      return;
-    }
-
-    const config = loadConfig(ctx.cwd);
-    if (!config.enabled) {
-      sandboxEnabled = false;
-      sandboxReady = false;
-      ctx.ui.notify('Sandbox disabled via config', 'info');
-      return;
-    }
-
-    enableSandbox(ctx);
-  });
-
-  pi.registerCommand('sandbox-enable', {
-    description: 'Enable the landstrip sandbox for this session',
-    handler: async (_args, ctx) => {
-      if (sandboxEnabled) {
-        ctx.ui.notify('Sandbox is already enabled', 'info');
-        return;
       }
 
-      if (enableSandbox(ctx)) ctx.ui.notify('Sandbox enabled', 'info');
-    },
-  });
-
-  pi.registerCommand('sandbox-disable', {
-    description: 'Disable the landstrip sandbox for this session',
-    handler: async (_args, ctx) => {
-      if (!sandboxEnabled) {
-        ctx.ui.notify('Sandbox is already disabled', 'info');
-        return;
+      if (isToolCallEventType('read', event)) {
+        const filePath = canonicalizePath(event.input.path);
+        if (!matchesPattern(filePath, getEffectiveAllowRead(ctx.cwd))) {
+          const choice = await promptReadBlock(ctx, filePath);
+          if (choice === 'abort') {
+            return {
+              block: true,
+              reason: `Sandbox: read access denied for "${filePath}"`,
+            };
+          }
+          await applyReadChoice(choice, filePath, ctx.cwd);
+        }
       }
 
-      sandboxEnabled = false;
-      sandboxReady = false;
-      ctx.ui.setStatus('sandbox', '');
-      ctx.ui.notify('Sandbox disabled', 'info');
-    },
-  });
+      if (isToolCallEventType('write', event) || isToolCallEventType('edit', event)) {
+        const filePath = canonicalizePath((event.input as { path: string }).path);
 
-  pi.registerCommand('sandbox', {
-    description: 'Show sandbox configuration',
-    handler: async (_args, ctx) => {
-      if (!sandboxEnabled) {
-        ctx.ui.notify('Sandbox is disabled', 'info');
+        if (matchesPattern(filePath, config.filesystem.denyWrite)) {
+          return {
+            block: true,
+            reason:
+              `Sandbox: write access denied for "${filePath}" (in denyWrite). ` +
+              `To change this, edit denyWrite in:\n  ${projectPath}\n  ${globalPath}`,
+          };
+        }
+
+        if (shouldPromptForWrite(filePath, getEffectiveAllowWrite(ctx.cwd), matchesPattern)) {
+          const choice = await promptWriteBlock(ctx, filePath);
+          if (choice === 'abort') {
+            return {
+              block: true,
+              reason: `Sandbox: write access denied for "${filePath}" (not in allowWrite)`,
+            };
+          }
+          await applyWriteChoice(choice, filePath, ctx.cwd);
+        }
+      }
+    });
+
+    pi.on('session_start', async (_event, ctx) => {
+      const noSandbox = maybePi.getFlag?.('no-sandbox') as boolean;
+
+      if (noSandbox) {
+        sandboxEnabled = false;
+        sandboxReady = false;
+        ctx.ui.notify('Sandbox disabled via --no-sandbox', 'warning');
         return;
       }
 
       const config = loadConfig(ctx.cwd);
-      const { globalPath, projectPath } = getConfigPaths(ctx.cwd);
-      const lines = [
-        'Sandbox Configuration',
-        `  Project config: ${projectPath}`,
-        `  Global config:  ${globalPath}`,
-        `  landstrip:      ${binaryPath()}`,
-        '',
-        'Network (bash through HTTP proxy):',
-        `  Allowed domains: ${config.network.allowedDomains.join(', ') || '(none)'}`,
-        `  Denied domains:  ${config.network.deniedDomains.join(', ') || '(none)'}`,
-        ...(sessionAllowedDomains.length > 0
-          ? [`  Session allowed: ${sessionAllowedDomains.join(', ')}`]
-          : []),
-        '',
-        'Filesystem (bash + read/write/edit tools):',
-        `  Deny Read:   ${config.filesystem.denyRead.join(', ') || '(none)'}`,
-        `  Allow Read:  ${config.filesystem.allowRead.join(', ') || '(none)'}`,
-        `  Allow Write: ${config.filesystem.allowWrite.join(', ') || '(none)'}`,
-        `  Deny Write:  ${config.filesystem.denyWrite.join(', ') || '(none)'}`,
-        ...(sessionAllowedReadPaths.length > 0
-          ? [`  Session read:  ${sessionAllowedReadPaths.join(', ')}`]
-          : []),
-        ...(sessionAllowedWritePaths.length > 0
-          ? [`  Session write: ${sessionAllowedWritePaths.join(', ')}`]
-          : []),
-      ];
+      if (!config.enabled) {
+        sandboxEnabled = false;
+        sandboxReady = false;
+        ctx.ui.notify('Sandbox disabled via config', 'info');
+        return;
+      }
 
-      ctx.ui.notify(lines.join('\n'), 'info');
-    },
-  });
+      enableSandbox(ctx);
+    });
+
+    maybePi.registerCommand?.('sandbox-enable', {
+      description: 'Enable the landstrip sandbox for this session',
+      handler: async (_args, ctx) => {
+        if (sandboxEnabled) {
+          ctx.ui.notify('Sandbox is already enabled', 'info');
+          return;
+        }
+
+        if (enableSandbox(ctx)) ctx.ui.notify('Sandbox enabled', 'info');
+      },
+    });
+
+    maybePi.registerCommand?.('sandbox-disable', {
+      description: 'Disable the landstrip sandbox for this session',
+      handler: async (_args, ctx) => {
+        if (!sandboxEnabled) {
+          ctx.ui.notify('Sandbox is already disabled', 'info');
+          return;
+        }
+
+        sandboxEnabled = false;
+        sandboxReady = false;
+        ctx.ui.setStatus('sandbox', '');
+        ctx.ui.notify('Sandbox disabled', 'info');
+      },
+    });
+
+    maybePi.registerCommand?.('sandbox', {
+      description: 'Show sandbox configuration',
+      handler: async (_args, ctx) => {
+        if (!sandboxEnabled) {
+          ctx.ui.notify('Sandbox is disabled', 'info');
+          return;
+        }
+
+        const config = loadConfig(ctx.cwd);
+        const { globalPath, projectPath } = getConfigPaths(ctx.cwd);
+        const lines = [
+          'Sandbox Configuration',
+          `  Project config: ${projectPath}`,
+          `  Global config:  ${globalPath}`,
+          `  landstrip:      ${binaryPath()}`,
+          '',
+          'Network (bash through HTTP proxy):',
+          `  Allowed domains: ${config.network.allowedDomains.join(', ') || '(none)'}`,
+          `  Denied domains:  ${config.network.deniedDomains.join(', ') || '(none)'}`,
+          ...(sessionAllowedDomains.length > 0
+            ? [`  Session allowed: ${sessionAllowedDomains.join(', ')}`]
+            : []),
+          '',
+          'Filesystem (bash + read/write/edit tools):',
+          `  Deny Read:   ${config.filesystem.denyRead.join(', ') || '(none)'}`,
+          `  Allow Read:  ${config.filesystem.allowRead.join(', ') || '(none)'}`,
+          `  Allow Write: ${config.filesystem.allowWrite.join(', ') || '(none)'}`,
+          `  Deny Write:  ${config.filesystem.denyWrite.join(', ') || '(none)'}`,
+          ...(sessionAllowedReadPaths.length > 0
+            ? [`  Session read:  ${sessionAllowedReadPaths.join(', ')}`]
+            : []),
+          ...(sessionAllowedWritePaths.length > 0
+            ? [`  Session write: ${sessionAllowedWritePaths.join(', ')}`]
+            : []),
+        ];
+
+        ctx.ui.notify(lines.join('\n'), 'info');
+      },
+    });
+  }
+
+  return { createBashTool, register };
 }

@@ -15,6 +15,7 @@
   },
   "files": [
     "index.ts",
+    "landstrip.d.ts",
     "README.md",
     "sandbox.json"
   ],
