@@ -72,12 +72,11 @@ interface LandstripErrorResponse {
   category: 'policy' | 'tool' | 'platform' | 'system';
   file?: string;
   program?: string;
-  target?: 'filesystem' | 'network' | 'platform';
-  kind?: 'launch' | 'encoding';
+  type?: 'filesystem' | 'network' | 'platform' | 'launch' | 'encoding';
   message: string;
 }
 
-const LANDSTRIP_VERSION = [0, 9, 2] as const;
+const LANDSTRIP_VERSION = [0, 9, 5] as const;
 const SUPPORTED_PLATFORMS = new Set<NodeJS.Platform>(['linux', 'darwin', 'win32']);
 
 const DEFAULT_CONFIG: SandboxConfig = {
@@ -353,6 +352,9 @@ function parseLandstripErrors(output: string): LandstripErrorResponse[] {
         parsed !== null &&
         typeof parsed.category === 'string' &&
         ['policy', 'tool', 'platform', 'system'].includes(parsed.category) &&
+        (parsed.type === undefined ||
+          (typeof parsed.type === 'string' &&
+            ['filesystem', 'network', 'platform', 'launch', 'encoding'].includes(parsed.type))) &&
         typeof parsed.message === 'string' &&
         parsed.message.length > 0
       ) {
@@ -371,14 +373,14 @@ function formatLandstripErrors(errors: LandstripErrorResponse[]): string {
     .map((err) => {
       const parts: string[] = [`landstrip: ${err.category}`];
 
-      if (err.target) {
-        parts.push(`(${err.target})`);
+      if (err.file) {
+        parts.push(` (${err.file})`);
       }
       if (err.program) {
         parts.push(` ${err.program}`);
       }
-      if (err.kind) {
-        parts.push(`:${err.kind}`);
+      if (err.type) {
+        parts.push(`:${err.type}`);
       }
       parts.push(`: ${err.message}`);
 
@@ -828,7 +830,10 @@ export default function (pi: ExtensionAPI) {
     });
   }
 
-  function createLandstripBashOps(ctx: ExtensionContext): BashOperations {
+  function createLandstripBashOps(
+    ctx: ExtensionContext,
+    onStderr: (data: Buffer) => void = () => {},
+  ): BashOperations {
     return {
       async exec(command, cwd, { onData, signal, timeout, env }) {
         if (!existsSync(cwd)) throw new Error(`Working directory does not exist: ${cwd}`);
@@ -881,7 +886,10 @@ export default function (pi: ExtensionAPI) {
 
           signal?.addEventListener('abort', onAbort, { once: true });
           child.stdout?.on('data', onData);
-          child.stderr?.on('data', onData);
+          child.stderr?.on('data', (data: Buffer) => {
+            onStderr(data);
+            onData(data);
+          });
 
           child.on('error', (error) => {
             cleanup();
@@ -910,18 +918,30 @@ export default function (pi: ExtensionAPI) {
     onUpdate: AgentToolUpdateCallback<BashToolDetails | undefined> | undefined,
     ctx: ExtensionContext,
   ): Promise<AgentToolResult<BashToolDetails | undefined>> {
+    let landstripStderr = '';
     const sandboxedBash = createBashToolDefinition(localCwd, {
-      operations: createLandstripBashOps(ctx),
+      operations: createLandstripBashOps(ctx, (data) => {
+        landstripStderr += data.toString('utf8');
+      }),
       shellPath: userShellPath,
     });
 
     const run = () => sandboxedBash.execute(id, params, signal, onUpdate, ctx);
-    const result = await run();
+    let result: AgentToolResult<BashToolDetails | undefined>;
+    try {
+      result = await run();
+    } catch (error) {
+      const landstripErrors = parseLandstripErrors(landstripStderr);
+      if (landstripErrors.length > 0) {
+        throw new Error(formatLandstripErrors(landstripErrors));
+      }
+      throw error;
+    }
     const outputText = result.content
       .filter((content) => content.type === 'text')
       .map((content) => content.text)
       .join('\n');
-    const landstripErrors = parseLandstripErrors(outputText);
+    const landstripErrors = parseLandstripErrors(landstripStderr);
     if (landstripErrors.length > 0) {
       const message = formatLandstripErrors(landstripErrors);
       result.content.unshift({ type: 'text', text: `\n${message}\n` });
@@ -1010,7 +1030,7 @@ export default function (pi: ExtensionAPI) {
     if (!hasMinimumVersion(version, LANDSTRIP_VERSION)) {
       sandboxEnabled = false;
       sandboxReady = false;
-      ctx.ui.notify(`landstrip 0.9.2 or newer is required; found: ${version}`, 'error');
+      ctx.ui.notify(`landstrip 0.9.5 or newer is required; found: ${version}`, 'error');
       return false;
     }
 
