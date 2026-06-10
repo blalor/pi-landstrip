@@ -356,6 +356,12 @@ function extractBlockedPath(output: string, cwd: string): string | null {
   );
   if (match) return normalizeBlockedPath(match[1], cwd);
 
+  // Landstrip structured error format with file field
+  const landstripErrors = parseLandstripErrors(output);
+  for (const error of landstripErrors) {
+    if (error.file) return normalizeBlockedPath(error.file, cwd);
+  }
+
   return null;
 }
 
@@ -1060,6 +1066,12 @@ export function createLandstripIntegration(
               } else if (!isWriteAllowed) {
                 const choice = await promptWriteBlock(ctx, blockedPath);
                 if (choice !== 'abort') await applyWriteChoice(choice, blockedPath, cwd);
+              }
+            } else if (!blockedPath && ctx.hasUI) {
+              const landstripErrors = parseLandstripErrors(stderrAcc);
+              if (landstripErrors.length > 0) {
+                const formatted = formatLandstripErrors(landstripErrors);
+                ctx.ui.notify(`Sandbox blocked an operation: ${formatted}`, 'warning');
               }
             }
 
