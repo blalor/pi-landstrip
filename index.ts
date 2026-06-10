@@ -606,12 +606,15 @@ function promptDomainBlock(ctx: ExtensionContext, domain: string): Promise<Permi
   );
 }
 
-function promptReadBlock(ctx: ExtensionContext, filePath: string): Promise<PermissionChoice> {
-  return showPermissionPrompt(
-    ctx,
-    `Read blocked: "${filePath}" is not in allowRead`,
-    PERMISSION_OPTIONS,
-  );
+function promptReadBlock(
+  ctx: ExtensionContext,
+  filePath: string,
+  reason?: string,
+): Promise<PermissionChoice> {
+  const title = reason
+    ? `Read blocked: "${filePath}" is in denyRead (${reason})`
+    : `Read blocked: "${filePath}" is not in allowRead`;
+  return showPermissionPrompt(ctx, title, PERMISSION_OPTIONS);
 }
 
 function promptWriteBlock(ctx: ExtensionContext, filePath: string): Promise<PermissionChoice> {
@@ -1039,6 +1042,7 @@ export function createLandstripIntegration(
             const blockedPath = extractBlockedPath(stderrAcc, cwd);
             if (blockedPath && ctx.hasUI) {
               const config = loadConfig(cwd);
+              const isDeniedByDenyRead = matchesPattern(blockedPath, config.filesystem.denyRead);
               const isReadAllowed = matchesPattern(blockedPath, getEffectiveAllowRead(cwd));
               const isWriteAllowed = !shouldPromptForWrite(
                 blockedPath,
@@ -1046,8 +1050,12 @@ export function createLandstripIntegration(
                 matchesPattern,
               );
 
-              if (!isReadAllowed) {
-                const choice = await promptReadBlock(ctx, blockedPath);
+              if (isDeniedByDenyRead || !isReadAllowed) {
+                const choice = await promptReadBlock(
+                  ctx,
+                  blockedPath,
+                  isDeniedByDenyRead ? 'denyRead overrides allowRead' : undefined,
+                );
                 if (choice !== 'abort') await applyReadChoice(choice, blockedPath, cwd);
               } else if (!isWriteAllowed) {
                 const choice = await promptWriteBlock(ctx, blockedPath);
