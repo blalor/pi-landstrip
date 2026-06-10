@@ -80,7 +80,7 @@ interface LandstripErrorResponse {
   message: string;
 }
 
-const LANDSTRIP_VERSION = [0, 9, 7] as const;
+const LANDSTRIP_VERSION = [0, 10, 1] as const;
 const SUPPORTED_PLATFORMS = new Set<NodeJS.Platform>(['linux', 'darwin', 'win32']);
 
 const DEFAULT_CONFIG: SandboxConfig = {
@@ -348,25 +348,38 @@ function extractBlockedWritePath(output: string, cwd: string): string | null {
 function parseLandstripErrors(output: string): LandstripErrorResponse[] {
   const errors: LandstripErrorResponse[] = [];
 
-  for (const line of output.split('\n')) {
-    try {
-      const parsed = JSON.parse(line);
+  for (const block of output.trim().split(/\n\n+/)) {
+    const fields: Record<string, string> = {};
+
+    for (const line of block.split('\n')) {
+      const colonIndex = line.indexOf(':');
+      if (colonIndex === -1) continue;
+      const key = line.slice(0, colonIndex).trim();
+      const value = line.slice(colonIndex + 1).trim();
+      if (key.length > 0 && value.length > 0) fields[key] = value;
+    }
+
+    if (
+      fields.category &&
+      ['policy', 'tool', 'platform', 'system'].includes(fields.category) &&
+      fields.message
+    ) {
+      const error: LandstripErrorResponse = {
+        category: fields.category as LandstripErrorResponse['category'],
+        message: fields.message,
+      };
+
+      if (fields.file) error.file = fields.file;
+      if (fields.program) error.program = fields.program;
 
       if (
-        typeof parsed === 'object' &&
-        parsed !== null &&
-        typeof parsed.category === 'string' &&
-        ['policy', 'tool', 'platform', 'system'].includes(parsed.category) &&
-        (parsed.type === undefined ||
-          (typeof parsed.type === 'string' &&
-            ['filesystem', 'network', 'platform', 'launch', 'encoding'].includes(parsed.type))) &&
-        typeof parsed.message === 'string' &&
-        parsed.message.length > 0
+        fields.type &&
+        ['filesystem', 'network', 'platform', 'launch', 'encoding'].includes(fields.type)
       ) {
-        errors.push(parsed as LandstripErrorResponse);
+        error.type = fields.type as LandstripErrorResponse['type'];
       }
-    } catch {
-      // ignore non-JSON lines
+
+      errors.push(error);
     }
   }
 
@@ -1062,7 +1075,7 @@ export function createLandstripIntegration(
     if (!hasMinimumVersion(version, LANDSTRIP_VERSION)) {
       sandboxEnabled = false;
       sandboxReady = false;
-      ctx.ui.notify(`landstrip 0.9.7 or newer is required; found: ${version}`, 'error');
+      ctx.ui.notify(`landstrip 0.10.1 or newer is required; found: ${version}`, 'error');
       return false;
     }
 
