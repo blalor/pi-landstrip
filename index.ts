@@ -62,6 +62,12 @@ interface SandboxConfig {
   filesystem: SandboxFilesystemConfig;
 }
 
+interface PiLandstripSettings {
+  landstrip?: {
+    enabled?: boolean;
+  };
+}
+
 interface LandstripPolicy {
   network: {
     allowNetwork: boolean;
@@ -182,6 +188,14 @@ function loadConfig(cwd: string): SandboxConfig {
   }
 
   return deepMerge(deepMerge(DEFAULT_CONFIG, globalConfig), projectConfig);
+}
+
+function isSandboxEnabledInPiSettings(cwd: string): boolean {
+  const settings = SettingsManager.create(cwd);
+  const globalSettings = settings.getGlobalSettings() as PiLandstripSettings;
+  const projectSettings = settings.getProjectSettings() as PiLandstripSettings;
+
+  return projectSettings.landstrip?.enabled ?? globalSettings.landstrip?.enabled ?? true;
 }
 
 function mergeArray(base: string[], override?: string[]): string[] {
@@ -1430,6 +1444,34 @@ export function createLandstripIntegration(
     return true;
   }
 
+  let noSandboxFlag = false;
+  function disableSandbox(ctx: ExtensionContext): void {
+    sandboxEnabled = false;
+    sandboxReady = false;
+    setTuiStatus(ctx, 'sandbox', undefined);
+  }
+
+  function ensureSandboxState(ctx: ExtensionContext): boolean {
+    if (noSandboxFlag) {
+      disableSandbox(ctx);
+      return false;
+    }
+
+    if (!isSandboxEnabledInPiSettings(ctx.cwd)) {
+      disableSandbox(ctx);
+      return false;
+    }
+
+    const config = loadConfig(ctx.cwd);
+    if (!config.enabled) {
+      disableSandbox(ctx);
+      return false;
+    }
+
+    if (!sandboxEnabled || !sandboxReady) return enableSandbox(ctx);
+    return true;
+  }
+
   function createBashTool(cwd: string, ctx?: ExtensionContext): LandstripBashTool {
     const localBash = createPlainBashTool(cwd);
 
@@ -1438,7 +1480,7 @@ export function createLandstripIntegration(
       label: 'bash (landstrip)',
       async execute(id, params, signal, onUpdate, callCtx) {
         const effectiveCtx = callCtx ?? ctx;
-        if (!sandboxEnabled || !sandboxReady || !effectiveCtx)
+        if (!effectiveCtx || !ensureSandboxState(effectiveCtx))
           return localBash.execute(id, params, signal, onUpdate, effectiveCtx);
 
         return runBashWithOptionalRetry(id, params, signal, onUpdate, effectiveCtx);
@@ -1462,9 +1504,8 @@ export function createLandstripIntegration(
     if (shouldRegisterBashTool) pi.registerTool(createBashTool(localCwd));
 
     pi.on('user_bash', async (event, ctx) => {
-      if (!sandboxEnabled || !sandboxReady) return;
+      if (!ensureSandboxState(ctx)) return;
       const config = loadConfig(ctx.cwd);
-      if (!config.enabled) return;
 
       if (!config.network.allowNetwork) {
         const blockedDomain = await preflightCommandDomains(event.command, ctx);
@@ -1484,10 +1525,9 @@ export function createLandstripIntegration(
     });
 
     pi.on('tool_call', async (event, ctx) => {
-      if (!sandboxEnabled) return;
+      if (!ensureSandboxState(ctx)) return;
 
       const config = loadConfig(ctx.cwd);
-      if (!config.enabled) return;
 
       const { globalPath, projectPath } = getConfigPaths(ctx.cwd);
 
@@ -1544,53 +1584,29 @@ export function createLandstripIntegration(
 
     pi.on('session_start', async (_event, ctx) => {
       resetSessionAllowances();
-      const noSandbox = maybePi.getFlag?.('no-sandbox') as boolean;
+      noSandboxFlag = Boolean(maybePi.getFlag?.('no-sandbox'));
 
-      if (noSandbox) {
-        sandboxEnabled = false;
-        sandboxReady = false;
+      if (noSandboxFlag) {
+        disableSandbox(ctx);
         notify(ctx, 'Sandbox disabled via --no-sandbox', 'warning');
+        return;
+      }
+
+      if (!isSandboxEnabledInPiSettings(ctx.cwd)) {
+        disableSandbox(ctx);
+        notify(ctx, 'Sandbox disabled via pi settings', 'info');
         return;
       }
 
       const config = loadConfig(ctx.cwd);
       if (!config.enabled) {
-        sandboxEnabled = false;
-        sandboxReady = false;
+        disableSandbox(ctx);
         notify(ctx, 'Sandbox disabled via config', 'info');
         return;
       }
 
       enableSandbox(ctx);
     });
-
-    maybePi.registerCommand?.('sandbox-enable', {
-      description: 'Enable the landstrip sandbox for this session',
-      handler: async (_args, ctx) => {
-        if (sandboxEnabled) {
-          notify(ctx, 'Sandbox is already enabled', 'info');
-          return;
-        }
-
-        if (enableSandbox(ctx)) notify(ctx, 'Sandbox enabled', 'info');
-      },
-    });
-
-    maybePi.registerCommand?.('sandbox-disable', {
-      description: 'Disable the landstrip sandbox for this session',
-      handler: async (_args, ctx) => {
-        if (!sandboxEnabled) {
-          notify(ctx, 'Sandbox is already disabled', 'info');
-          return;
-        }
-
-        sandboxEnabled = false;
-        sandboxReady = false;
-        setTuiStatus(ctx, 'sandbox', undefined);
-        notify(ctx, 'Sandbox disabled', 'info');
-      },
-    });
-
     maybePi.registerCommand?.('sandbox', {
       description: 'Show sandbox configuration',
       handler: async (_args, ctx) => {

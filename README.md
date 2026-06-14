@@ -23,11 +23,19 @@ Project config takes precedence.
 
 See [`sandbox.json`](./sandbox.json) for a starter config.
 
-## Usage
+Use Pi settings to toggle sandboxing:
 
-```bash
-pi --no-sandbox
+```json
+{
+  "landstrip": {
+    "enabled": false
+  }
+}
 ```
+
+Project Pi settings override global Pi settings.
+
+## Usage
 
 Use `/sandbox` inside Pi to show the active config.
 
