@@ -391,38 +391,10 @@ function isFilesystemTrap(trap: LandstripTrap): trap is LandstripFilesystemTrap 
   return trap.kind === 'filesystem';
 }
 
-function extractCandidatePaths(command: string): string[] {
-  const paths: string[] = [];
-  // Split on whitespace, preserving quoted strings minimally
-  const tokens = command.match(/[^\s"']+|"[^"]*"|'[^']*'/g) ?? [];
-  for (const token of tokens) {
-    const clean = token.replace(/^["']|["']$/g, '').replace(/[,;]$/, '');
-    if (isPathLike(clean)) {
-      paths.push(clean);
-    }
-  }
-  return paths;
-}
-
-function extractBlockedPath(output: string, cwd: string, command?: string): string | null {
+function extractBlockedPath(output: string, cwd: string): string | null {
   const landstripErrors = parseLandstripTraps(output).filter(isFilesystemTrap);
   if (landstripErrors.length > 0) {
     return normalizeBlockedPath(landstripErrors[0].file, cwd);
-  }
-
-  // If landstrip reported an error but without a file field, try to
-  // extract the blocked path from the command itself.
-  if (landstripErrors.length > 0 && command) {
-    const config = loadConfig(cwd);
-    for (const candidate of extractCandidatePaths(command)) {
-      const resolved = normalizeBlockedPath(candidate, cwd);
-      if (
-        matchesPattern(resolved, config.filesystem.denyRead) ||
-        !matchesPattern(resolved, config.filesystem.allowRead)
-      ) {
-        return resolved;
-      }
-    }
   }
 
   return extractNativeDeniedPath(output, cwd);
@@ -1229,8 +1201,8 @@ export function createLandstripIntegration(
             const errorOutput = errorFdAcc || stderrAcc;
 
             const blockedPath =
-              extractBlockedPath(errorOutput, cwd, command) ??
-              (errorFdAcc ? extractBlockedPath(stderrAcc, cwd, command) : null);
+              extractBlockedPath(errorOutput, cwd) ??
+              (errorFdAcc ? extractBlockedPath(stderrAcc, cwd) : null);
             const blockedWritePath =
               extractBlockedWritePath(errorOutput, cwd) ??
               (errorFdAcc ? extractBlockedWritePath(stderrAcc, cwd) : null);
