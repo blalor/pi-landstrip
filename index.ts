@@ -198,7 +198,7 @@ function deepMerge(base: SandboxConfig, overrides: Partial<SandboxConfig>): Sand
 
 function getConfigPaths(cwd: string): { globalPath: string; projectPath: string } {
   return {
-    globalPath: join(homedir(), '.pi', 'agent', 'sandbox.json'),
+    globalPath: join(getAgentDir(), 'sandbox.json'),
     projectPath: join(cwd, '.pi', 'sandbox.json'),
   };
 }
