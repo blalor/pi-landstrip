@@ -24,7 +24,13 @@ import {
   rmSync,
   writeFileSync,
 } from 'node:fs';
-import { type AddressInfo, connect as connectNet, createServer, type Socket } from 'node:net';
+import {
+  type AddressInfo,
+  connect as connectNet,
+  createServer,
+  type Socket,
+  Socket as NetSocket,
+} from 'node:net';
 import { homedir, tmpdir } from 'node:os';
 import { basename, dirname, isAbsolute, join, resolve } from 'node:path';
 import { URL } from 'node:url';
@@ -39,6 +45,7 @@ import {
   withFileMutationQueue,
 } from '@earendil-works/pi-coding-agent';
 import { Key, matchesKey, truncateToWidth, visibleWidth } from '@earendil-works/pi-tui';
+import { randomBytes } from 'node:crypto';
 
 interface SandboxFilesystemConfig {
   denyRead: string[];
@@ -1124,6 +1131,29 @@ export function createLandstripIntegration(
     });
   }
 
+  function createSocketPair(): Promise<[NetSocket, NetSocket]> {
+    return new Promise((resolve, reject) => {
+      const sockPath = join(tmpdir(), `.landstrip-sock-${randomBytes(8).toString('hex')}`);
+      const server = createServer();
+      server.on('error', reject);
+      let client: NetSocket | null = null;
+      server.on('connection', (serverEnd) => {
+        server.close();
+        try {
+          rmSync(sockPath, { force: true });
+        } catch {
+          /* ok */
+        }
+        if (client) resolve([client, serverEnd]);
+      });
+      server.listen(sockPath, () => {
+        client = new NetSocket();
+        client.on('error', reject);
+        client.connect(sockPath);
+      });
+    });
+  }
+
   function createLandstripBashOps(
     ctx: ExtensionContext,
     callbacks: LandstripBashCallbacks = {},
@@ -1140,119 +1170,166 @@ export function createLandstripIntegration(
         const landstripArgs = ['--trap-fd', '3', '-p', policy.path, shell, ...args, command];
 
         return new Promise((resolvePromise, reject) => {
-          let timeoutHandle: NodeJS.Timeout | undefined;
-          let timedOut = false;
-          let cleaned = false;
+          (async () => {
+            let timeoutHandle: NodeJS.Timeout | undefined;
+            let timedOut = false;
+            let cleaned = false;
 
-          const cleanup = () => {
-            if (cleaned) return;
-            cleaned = true;
-            if (timeoutHandle) clearTimeout(timeoutHandle);
-            signal?.removeEventListener('abort', onAbort);
-            void proxy?.stop();
-            rmSync(policy.dir, { recursive: true, force: true });
-          };
+            // Create socketpair for bidirectional query-response on fd 3.
+            const [trapSocket, childEnd] = await createSocketPair();
 
-          const child = spawn(binaryPath(), landstripArgs, {
-            cwd,
-            env: allowNetwork ? { ...process.env, ...env } : proxyEnv(env, proxy!.port),
-            detached: true,
-            stdio: ['ignore', 'pipe', 'pipe', 'pipe'],
-          });
+            const cleanup = () => {
+              if (cleaned) return;
+              cleaned = true;
+              if (timeoutHandle) clearTimeout(timeoutHandle);
+              signal?.removeEventListener('abort', onAbort);
+              void proxy?.stop();
+              trapSocket.destroy();
+              rmSync(policy.dir, { recursive: true, force: true });
+            };
 
-          function killChild(): void {
-            if (!child.pid) return;
-            try {
-              process.kill(-child.pid, 'SIGKILL');
-            } catch {
-              child.kill('SIGKILL');
+            const child = spawn(binaryPath(), landstripArgs, {
+              cwd,
+              env: allowNetwork ? { ...process.env, ...env } : proxyEnv(env, proxy!.port),
+              detached: true,
+              stdio: ['ignore', 'pipe', 'pipe', childEnd],
+            });
+
+            // Child has dup'd its end; parent can close its copy.
+            childEnd.destroy();
+
+            function killChild(): void {
+              if (!child.pid) return;
+              try {
+                process.kill(-child.pid, 'SIGKILL');
+              } catch {
+                child.kill('SIGKILL');
+              }
             }
-          }
 
-          function onAbort(): void {
-            killChild();
-          }
-
-          if (timeout !== undefined && timeout > 0) {
-            timeoutHandle = setTimeout(() => {
-              timedOut = true;
+            function onAbort(): void {
               killChild();
-            }, timeout * 1000);
-          }
-
-          signal?.addEventListener('abort', onAbort, { once: true });
-          let stderrAcc = '';
-          let errorFdAcc = '';
-
-          child.stdout?.on('data', onData);
-          child.stderr?.on('data', (data: Buffer) => {
-            stderrAcc += data.toString('utf8');
-            callbacks.onStderr?.(data);
-            onData(data);
-          });
-          child.stdio[3]?.on('data', (data: Buffer) => {
-            errorFdAcc += data.toString('utf8');
-            callbacks.onErrorFd?.(data);
-          });
-
-          child.on('error', (error) => {
-            cleanup();
-            reject(error);
-          });
-
-          child.on('close', async (code) => {
-            cleanup();
-            if (signal?.aborted) {
-              reject(new Error('aborted'));
-              return;
-            }
-            if (timedOut) {
-              reject(new Error(`timeout:${timeout}`));
-              return;
             }
 
-            const errorOutput = errorFdAcc || stderrAcc;
+            if (timeout !== undefined && timeout > 0) {
+              timeoutHandle = setTimeout(() => {
+                timedOut = true;
+                killChild();
+              }, timeout * 1000);
+            }
 
-            const blockedPath =
-              extractBlockedPath(errorOutput, cwd) ??
-              (errorFdAcc ? extractBlockedPath(stderrAcc, cwd) : null);
-            const blockedWritePath =
-              extractBlockedWritePath(errorOutput, cwd) ??
-              (errorFdAcc ? extractBlockedWritePath(stderrAcc, cwd) : null);
-            if (blockedPath && ctx.hasUI) {
-              const config = loadConfig(cwd);
-              const isDeniedByDenyRead = matchesPattern(blockedPath, config.filesystem.denyRead);
-              const isReadAllowed = matchesPattern(blockedPath, getEffectiveAllowRead(cwd));
-              const isWriteAllowed = !shouldPromptForWrite(
-                blockedPath,
-                getEffectiveAllowWrite(cwd),
-                matchesPattern,
-              );
+            signal?.addEventListener('abort', onAbort, { once: true });
+            const resolvedQueryIds = new Set<number>();
+            let stderrAcc = '';
+            let errorFdAcc = '';
 
-              if (blockedWritePath === blockedPath && !isWriteAllowed) {
-                const choice = await promptWriteBlock(ctx, blockedPath);
-                if (choice !== 'abort') await applyWriteChoice(choice, blockedPath, cwd);
-              } else if (isDeniedByDenyRead || !isReadAllowed) {
-                const choice = await promptReadBlock(
-                  ctx,
+            child.stdout?.on('data', onData);
+            child.stderr?.on('data', (data: Buffer) => {
+              stderrAcc += data.toString('utf8');
+              callbacks.onStderr?.(data);
+              onData(data);
+            });
+            trapSocket.on('data', (data: Buffer) => {
+              errorFdAcc += data.toString('utf8');
+              callbacks.onErrorFd?.(data);
+              // Process query traps in real-time.
+              if (ctx.hasUI) {
+                const traps = parseLandstripTraps(errorFdAcc);
+                for (const trap of traps) {
+                  if (
+                    trap.kind === 'filesystem' &&
+                    trap.operation === 'write' &&
+                    'state' in trap &&
+                    (trap as any).state === 'query' &&
+                    'query_id' in trap
+                  ) {
+                    const queryId = (trap as any).query_id as number;
+                    if (!resolvedQueryIds.has(queryId)) {
+                      resolvedQueryIds.add(queryId);
+                      handleWriteQuery(trapSocket, queryId, trap.file, cwd, ctx).catch(() => {});
+                    }
+                  }
+                }
+              }
+            });
+
+            async function handleWriteQuery(
+              socket: NetSocket,
+              queryId: number,
+              file: string,
+              cwd: string,
+              ctx: ExtensionContext,
+            ): Promise<void> {
+              const choice = await promptWriteBlock(ctx, file);
+              if (choice !== 'abort') {
+                await applyWriteChoice(choice, file, cwd);
+              }
+              const action = choice === 'abort' ? 'deny' : 'allow';
+              const response = JSON.stringify({ query_id: queryId, action }) + '\n';
+              if (!socket.destroyed) {
+                socket.write(response);
+              }
+            }
+
+            child.on('error', (error) => {
+              cleanup();
+              reject(error);
+            });
+
+            child.on('close', async (code) => {
+              cleanup();
+              if (signal?.aborted) {
+                reject(new Error('aborted'));
+                return;
+              }
+              if (timedOut) {
+                reject(new Error(`timeout:${timeout}`));
+                return;
+              }
+
+              const errorOutput = errorFdAcc || stderrAcc;
+
+              const blockedPath =
+                extractBlockedPath(errorOutput, cwd) ??
+                (errorFdAcc ? extractBlockedPath(stderrAcc, cwd) : null);
+              const blockedWritePath =
+                extractBlockedWritePath(errorOutput, cwd) ??
+                (errorFdAcc ? extractBlockedWritePath(stderrAcc, cwd) : null);
+              if (blockedPath && ctx.hasUI) {
+                const config = loadConfig(cwd);
+                const isDeniedByDenyRead = matchesPattern(blockedPath, config.filesystem.denyRead);
+                const isReadAllowed = matchesPattern(blockedPath, getEffectiveAllowRead(cwd));
+                const isWriteAllowed = !shouldPromptForWrite(
                   blockedPath,
-                  isDeniedByDenyRead ? 'granting allowRead will override it' : undefined,
+                  getEffectiveAllowWrite(cwd),
+                  matchesPattern,
                 );
-                if (choice !== 'abort') await applyReadChoice(choice, blockedPath, cwd);
-              } else if (!isWriteAllowed) {
-                const choice = await promptWriteBlock(ctx, blockedPath);
-                if (choice !== 'abort') await applyWriteChoice(choice, blockedPath, cwd);
-              }
-            } else if (!blockedPath && ctx.hasUI) {
-              const landstripErrors = parseLandstripTraps(errorOutput);
-              if (landstripErrors.length > 0) {
-                const formatted = formatLandstripTraps(landstripErrors);
-                notify(ctx, `Sandbox blocked an operation: ${formatted}`, 'warning');
-              }
-            }
 
-            resolvePromise({ exitCode: code });
-          });
+                if (blockedWritePath === blockedPath && !isWriteAllowed) {
+                  const choice = await promptWriteBlock(ctx, blockedPath);
+                  if (choice !== 'abort') await applyWriteChoice(choice, blockedPath, cwd);
+                } else if (isDeniedByDenyRead || !isReadAllowed) {
+                  const choice = await promptReadBlock(
+                    ctx,
+                    blockedPath,
+                    isDeniedByDenyRead ? 'granting allowRead will override it' : undefined,
+                  );
+                  if (choice !== 'abort') await applyReadChoice(choice, blockedPath, cwd);
+                } else if (!isWriteAllowed) {
+                  const choice = await promptWriteBlock(ctx, blockedPath);
+                  if (choice !== 'abort') await applyWriteChoice(choice, blockedPath, cwd);
+                }
+              } else if (!blockedPath && ctx.hasUI) {
+                const landstripErrors = parseLandstripTraps(errorOutput);
+                if (landstripErrors.length > 0) {
+                  const formatted = formatLandstripTraps(landstripErrors);
+                  notify(ctx, `Sandbox blocked an operation: ${formatted}`, 'warning');
+                }
+              }
+
+              resolvePromise({ exitCode: code });
+            });
+          })().catch(reject);
         });
       },
     };
