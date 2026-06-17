@@ -464,53 +464,56 @@ function extractBlockedReadPath(output: string, cwd: string): string | null {
   return extractNativeDeniedPath(output, cwd);
 }
 
-// Returns the first `length` elements of a string tuple, or null if `value` is
-// not an array of at least that many strings.
-function stringTuple(value: unknown, length: number): string[] | null {
-  if (!Array.isArray(value) || value.length < length) return null;
-  const head = value.slice(0, length);
-  return head.every((item) => typeof item === 'string') ? (head as string[]) : null;
+function asString(value: unknown): string | null {
+  return typeof value === 'string' ? value : null;
 }
 
-// landstrip emits each trap as a serde externally-tagged enum: a single-key
-// object whose key is the variant name (`Filesystem`, `Network`, `Launch`,
-// `Usage`, `Internal`) and whose value is the variant payload.
+// landstrip emits each trap as a flat JSON record tagged by a `kind`
+// discriminant (`filesystem`, `network`, `launch`, `usage`, `internal`)
+// alongside a stable `code` and variant-specific fields.
 function parseLandstripTrap(obj: Record<string, unknown>): LandstripTrap | null {
-  const fs = stringTuple(obj.Filesystem, 3);
-  if (fs) {
-    const [operation, file, mechanism] = fs;
-    if (operation === 'read' || operation === 'write') {
-      return { kind: 'filesystem', operation, file, mechanism };
+  switch (obj.kind) {
+    case 'filesystem': {
+      const operation = obj.operation;
+      const file = asString(obj.path);
+      if ((operation === 'read' || operation === 'write') && file !== null) {
+        return { kind: 'filesystem', operation, file, mechanism: asString(obj.mechanism) ?? '' };
+      }
+      return null;
     }
-    return null;
-  }
-
-  const net = stringTuple(obj.Network, 3);
-  if (net) {
-    const [operation, target, mechanism] = net;
-    return { kind: 'network', operation, target, mechanism };
-  }
-
-  const launch = stringTuple(obj.Launch, 2);
-  if (launch) {
-    const [program, source] = launch;
-    return { kind: 'launch', program, source };
-  }
-
-  if (typeof obj.Usage === 'string') {
-    return { kind: 'usage', message: obj.Usage };
-  }
-
-  const internal = obj.Internal;
-  if (typeof internal === 'object' && internal !== null && !Array.isArray(internal)) {
-    const detail: Record<string, string> = {};
-    for (const [key, value] of Object.entries(internal)) {
-      if (typeof value === 'string') detail[key] = value;
+    case 'network': {
+      const operation = asString(obj.operation);
+      const target = asString(obj.target);
+      if (operation !== null && target !== null) {
+        return { kind: 'network', operation, target, mechanism: asString(obj.mechanism) ?? '' };
+      }
+      return null;
     }
-    return { kind: 'internal', detail };
+    case 'launch': {
+      const program = asString(obj.program);
+      const source = asString(obj.message);
+      if (program !== null && source !== null) {
+        return { kind: 'launch', program, source };
+      }
+      return null;
+    }
+    case 'usage': {
+      const message = asString(obj.message);
+      return message !== null ? { kind: 'usage', message } : null;
+    }
+    case 'internal': {
+      const detail: Record<string, string> = {};
+      const raw = obj.detail;
+      if (typeof raw === 'object' && raw !== null && !Array.isArray(raw)) {
+        for (const [key, value] of Object.entries(raw)) {
+          if (typeof value === 'string') detail[key] = value;
+        }
+      }
+      return { kind: 'internal', detail };
+    }
+    default:
+      return null;
   }
-
-  return null;
 }
 
 function parseLandstripTraps(output: string): LandstripTrap[] {
@@ -1233,7 +1236,7 @@ export function createLandstripIntegration(
                 const choice = await promptReadBlock(
                   ctx,
                   blockedPath,
-                  isDeniedByDenyRead ? 'denyRead overrides allowRead' : undefined,
+                  isDeniedByDenyRead ? 'granting allowRead will override it' : undefined,
                 );
                 if (choice !== 'abort') await applyReadChoice(choice, blockedPath, cwd);
               } else if (!isWriteAllowed) {
@@ -1331,7 +1334,7 @@ export function createLandstripIntegration(
           ctx,
           blockedPath,
           matchesPattern(blockedPath, config.filesystem.denyRead)
-            ? 'denyRead overrides allowRead'
+            ? 'granting allowRead will override it'
             : undefined,
         );
         if (choice === 'abort') return null;
