@@ -97,7 +97,7 @@ interface LandstripBashCallbacks {
   onErrorFd?: (data: Buffer) => void;
 }
 
-const LANDSTRIP_VERSION = [0, 15, 4] as const;
+const LANDSTRIP_VERSION = [0, 15, 9] as const;
 const REQUIRED_LANDSTRIP_VERSION = LANDSTRIP_VERSION.join('.');
 const SUPPORTED_PLATFORMS = new Set<NodeJS.Platform>(['linux', 'darwin', 'win32']);
 
@@ -1238,7 +1238,7 @@ export function createLandstripIntegration(
                 for (const trap of traps) {
                   if (
                     trap.kind === 'filesystem' &&
-                    trap.operation === 'write' &&
+                    (trap.operation === 'write' || trap.operation === 'read') &&
                     'state' in trap &&
                     (trap as any).state === 'query' &&
                     'query_id' in trap
@@ -1246,23 +1246,30 @@ export function createLandstripIntegration(
                     const queryId = (trap as any).query_id as number;
                     if (!resolvedQueryIds.has(queryId)) {
                       resolvedQueryIds.add(queryId);
-                      handleWriteQuery(trapSocket, queryId, trap.file, cwd, ctx).catch(() => {});
+                      handleFsQuery(trapSocket, queryId, trap.operation, trap.file, cwd, ctx).catch(
+                        () => {},
+                      );
                     }
                   }
                 }
               }
             });
 
-            async function handleWriteQuery(
+            async function handleFsQuery(
               socket: NetSocket,
               queryId: number,
+              operation: 'read' | 'write',
               file: string,
               cwd: string,
               ctx: ExtensionContext,
             ): Promise<void> {
-              const choice = await promptWriteBlock(ctx, file);
+              const choice =
+                operation === 'read'
+                  ? await promptReadBlock(ctx, file)
+                  : await promptWriteBlock(ctx, file);
               if (choice !== 'abort') {
-                await applyWriteChoice(choice, file, cwd);
+                if (operation === 'read') await applyReadChoice(choice, file, cwd);
+                else await applyWriteChoice(choice, file, cwd);
               }
               const action = choice === 'abort' ? 'deny' : 'allow';
               const response = JSON.stringify({ query_id: queryId, action }) + '\n';
