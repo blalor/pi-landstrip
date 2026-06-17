@@ -454,6 +454,16 @@ function extractBlockedWritePath(output: string, cwd: string): string | null {
   return extractNativeWriteDeniedPath(output, cwd);
 }
 
+function extractBlockedReadPath(output: string, cwd: string): string | null {
+  for (const error of parseLandstripTraps(output).filter(isFilesystemTrap)) {
+    if (error.operation === 'read') {
+      return normalizeBlockedPath(error.file, cwd);
+    }
+  }
+
+  return extractNativeDeniedPath(output, cwd);
+}
+
 // Returns the first `length` elements of a string tuple, or null if `value` is
 // not an array of at least that many strings.
 function stringTuple(value: unknown, length: number): string[] | null {
@@ -1310,17 +1320,54 @@ export function createLandstripIntegration(
       return run();
     };
 
+    const retryWithReadAccess = async (
+      blockedPath: string,
+    ): Promise<AgentToolResult<BashToolDetails | undefined> | null> => {
+      if (!ctx.hasUI) return null;
+
+      if (!matchesPattern(blockedPath, getEffectiveAllowRead(ctx.cwd))) {
+        const config = loadConfig(ctx.cwd);
+        const choice = await promptReadBlock(
+          ctx,
+          blockedPath,
+          matchesPattern(blockedPath, config.filesystem.denyRead)
+            ? 'denyRead overrides allowRead'
+            : undefined,
+        );
+        if (choice === 'abort') return null;
+        await applyReadChoice(choice, blockedPath, ctx.cwd);
+      }
+
+      onUpdate?.({
+        content: [
+          { type: 'text', text: `\n--- Read access granted for "${blockedPath}", retrying ---\n` },
+        ],
+        details: {},
+      });
+      landstripErrorOutput = '';
+      stderrOutput = '';
+      return run();
+    };
+
     let result: AgentToolResult<BashToolDetails | undefined>;
     try {
       result = await run();
     } catch (error) {
       const errorText = error instanceof Error ? error.message : String(error);
       const fallbackOutput = `${stderrOutput}\n${errorText}`;
-      const blockedPath =
+      const blockedWritePath =
         extractBlockedWritePath(landstripErrorOutput, ctx.cwd) ??
         extractBlockedWritePath(fallbackOutput, ctx.cwd);
-      if (blockedPath) {
-        const retryResult = await retryWithWriteAccess(blockedPath);
+      if (blockedWritePath) {
+        const retryResult = await retryWithWriteAccess(blockedWritePath);
+        if (retryResult) return retryResult;
+      }
+
+      const blockedReadPath =
+        extractBlockedReadPath(landstripErrorOutput, ctx.cwd) ??
+        extractBlockedReadPath(fallbackOutput, ctx.cwd);
+      if (blockedReadPath) {
+        const retryResult = await retryWithReadAccess(blockedReadPath);
         if (retryResult) return retryResult;
       }
 
@@ -1335,12 +1382,20 @@ export function createLandstripIntegration(
       const message = formatLandstripTraps(landstripErrors);
       result.content.unshift({ type: 'text', text: `\n${message}\n` });
     }
-    const blockedPath =
+    const blockedWritePath =
       extractBlockedWritePath(landstripErrorOutput, ctx.cwd) ??
       extractBlockedWritePath(stderrOutput, ctx.cwd);
-    if (!blockedPath) return result;
+    if (blockedWritePath) {
+      const retryResult = await retryWithWriteAccess(blockedWritePath);
+      if (retryResult) return retryResult;
+    }
 
-    const retryResult = await retryWithWriteAccess(blockedPath);
+    const blockedReadPath =
+      extractBlockedReadPath(landstripErrorOutput, ctx.cwd) ??
+      extractBlockedReadPath(stderrOutput, ctx.cwd);
+    if (!blockedReadPath) return result;
+
+    const retryResult = await retryWithReadAccess(blockedReadPath);
     return retryResult ?? result;
   }
 
