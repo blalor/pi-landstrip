@@ -96,6 +96,7 @@ type LandstripTrap =
 interface LandstripBashCallbacks {
   onStderr?: (data: Buffer) => void;
   onErrorFd?: (data: Buffer) => void;
+  promptOnBlock?: boolean;
 }
 
 const LANDSTRIP_VERSION = [0, 15, 9] as const;
@@ -1248,7 +1249,7 @@ export function createLandstripIntegration(
               const blockedWritePath =
                 extractBlockedWritePath(errorOutput, cwd) ??
                 (errorFdAcc ? extractBlockedWritePath(stderrAcc, cwd) : null);
-              if (blockedPath && ctx.hasUI) {
+              if (blockedPath && ctx.hasUI && callbacks.promptOnBlock) {
                 const config = loadConfig(cwd);
                 const isDeniedByDenyRead = matchesPattern(blockedPath, config.filesystem.denyRead);
                 const isReadAllowed = matchesPattern(blockedPath, getEffectiveAllowRead(config));
@@ -1594,7 +1595,7 @@ export function createLandstripIntegration(
         }
       }
 
-      return { operations: createLandstripBashOps(ctx) };
+      return { operations: createLandstripBashOps(ctx, { promptOnBlock: true }) };
     });
 
     pi.on('tool_call', async (event, ctx) => {
