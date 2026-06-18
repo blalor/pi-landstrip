@@ -442,11 +442,6 @@ function extractNativeWriteDeniedPath(output: string, cwd: string): string | nul
   if (match) return normalizePathMatch(match[1], cwd);
 
   match = output.match(
-    /(?:\/bin\/bash|bash|sh): (?:line \d+: )?([^:\n]+): (?:Operation not permitted|Permission denied)/,
-  );
-  if (match) return normalizePathMatch(match[1], cwd);
-
-  match = output.match(
     /^[a-zA-Z0-9_-]+: cannot create(?: directory)? '?([^'\n]+?)'?(?: for writing)?: (?:Operation not permitted|Permission denied)$/m,
   );
   if (match) return normalizePathMatch(match[1], cwd);
