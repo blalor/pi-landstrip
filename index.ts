@@ -1219,7 +1219,6 @@ export function createLandstripIntegration(
             }
 
             signal?.addEventListener('abort', onAbort, { once: true });
-            const resolvedQueryIds = new Set<number>();
             let stderrAcc = '';
             let errorFdAcc = '';
 
@@ -1232,51 +1231,7 @@ export function createLandstripIntegration(
             trapSocket.on('data', (data: Buffer) => {
               errorFdAcc += data.toString('utf8');
               callbacks.onErrorFd?.(data);
-              // Process query traps in real-time.
-              if (ctx.hasUI) {
-                const traps = parseLandstripTraps(errorFdAcc);
-                for (const trap of traps) {
-                  if (
-                    trap.kind === 'filesystem' &&
-                    (trap.operation === 'write' || trap.operation === 'read') &&
-                    'state' in trap &&
-                    (trap as any).state === 'query' &&
-                    'query_id' in trap
-                  ) {
-                    const queryId = (trap as any).query_id as number;
-                    if (!resolvedQueryIds.has(queryId)) {
-                      resolvedQueryIds.add(queryId);
-                      handleFsQuery(trapSocket, queryId, trap.operation, trap.file, cwd, ctx).catch(
-                        () => {},
-                      );
-                    }
-                  }
-                }
-              }
             });
-
-            async function handleFsQuery(
-              socket: NetSocket,
-              queryId: number,
-              operation: 'read' | 'write',
-              file: string,
-              cwd: string,
-              ctx: ExtensionContext,
-            ): Promise<void> {
-              const choice =
-                operation === 'read'
-                  ? await promptReadBlock(ctx, file)
-                  : await promptWriteBlock(ctx, file);
-              if (choice !== 'abort') {
-                if (operation === 'read') await applyReadChoice(choice, file, cwd);
-                else await applyWriteChoice(choice, file, cwd);
-              }
-              const action = choice === 'abort' ? 'deny' : 'allow';
-              const response = JSON.stringify({ query_id: queryId, action }) + '\n';
-              if (!socket.destroyed) {
-                socket.write(response);
-              }
-            }
 
             child.on('error', (error) => {
               cleanup();
