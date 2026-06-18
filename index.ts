@@ -1230,58 +1230,63 @@ export function createLandstripIntegration(
               reject(error);
             });
 
-            child.on('close', async (code) => {
-              cleanup();
-              if (signal?.aborted) {
-                reject(new Error('aborted'));
-                return;
-              }
-              if (timedOut) {
-                reject(new Error(`timeout:${timeout}`));
-                return;
-              }
+            child.on('close', (code) => {
+              void (async () => {
+                cleanup();
+                if (signal?.aborted) {
+                  reject(new Error('aborted'));
+                  return;
+                }
+                if (timedOut) {
+                  reject(new Error(`timeout:${timeout}`));
+                  return;
+                }
 
-              const errorOutput = errorFdAcc || stderrAcc;
+                const errorOutput = errorFdAcc || stderrAcc;
 
-              const blockedPath =
-                extractBlockedPath(errorOutput, cwd) ??
-                (errorFdAcc ? extractBlockedPath(stderrAcc, cwd) : null);
-              const blockedWritePath =
-                extractBlockedWritePath(errorOutput, cwd) ??
-                (errorFdAcc ? extractBlockedWritePath(stderrAcc, cwd) : null);
-              if (blockedPath && ctx.hasUI && callbacks.promptOnBlock) {
-                const config = loadConfig(cwd);
-                const isDeniedByDenyRead = matchesPattern(blockedPath, config.filesystem.denyRead);
-                const isReadAllowed = matchesPattern(blockedPath, getEffectiveAllowRead(config));
-                const isWriteAllowed = !shouldPromptForWrite(
-                  blockedPath,
-                  getEffectiveAllowWrite(config),
-                  matchesPattern,
-                );
-
-                if (blockedWritePath === blockedPath && !isWriteAllowed) {
-                  const choice = await promptWriteBlock(ctx, blockedPath);
-                  if (choice !== 'abort') await applyWriteChoice(choice, blockedPath, cwd);
-                } else if (isDeniedByDenyRead || !isReadAllowed) {
-                  const choice = await promptReadBlock(
-                    ctx,
+                const blockedPath =
+                  extractBlockedPath(errorOutput, cwd) ??
+                  (errorFdAcc ? extractBlockedPath(stderrAcc, cwd) : null);
+                const blockedWritePath =
+                  extractBlockedWritePath(errorOutput, cwd) ??
+                  (errorFdAcc ? extractBlockedWritePath(stderrAcc, cwd) : null);
+                if (blockedPath && ctx.hasUI && callbacks.promptOnBlock) {
+                  const config = loadConfig(cwd);
+                  const isDeniedByDenyRead = matchesPattern(
                     blockedPath,
-                    isDeniedByDenyRead ? 'granting allowRead will override it' : undefined,
+                    config.filesystem.denyRead,
                   );
-                  if (choice !== 'abort') await applyReadChoice(choice, blockedPath, cwd);
-                } else if (!isWriteAllowed) {
-                  const choice = await promptWriteBlock(ctx, blockedPath);
-                  if (choice !== 'abort') await applyWriteChoice(choice, blockedPath, cwd);
-                }
-              } else if (!blockedPath && ctx.hasUI) {
-                const landstripErrors = parseLandstripTraps(errorOutput);
-                if (landstripErrors.length > 0) {
-                  const formatted = formatLandstripTraps(landstripErrors);
-                  notify(ctx, `Sandbox blocked an operation: ${formatted}`, 'warning');
-                }
-              }
+                  const isReadAllowed = matchesPattern(blockedPath, getEffectiveAllowRead(config));
+                  const isWriteAllowed = !shouldPromptForWrite(
+                    blockedPath,
+                    getEffectiveAllowWrite(config),
+                    matchesPattern,
+                  );
 
-              resolvePromise({ exitCode: code });
+                  if (blockedWritePath === blockedPath && !isWriteAllowed) {
+                    const choice = await promptWriteBlock(ctx, blockedPath);
+                    if (choice !== 'abort') await applyWriteChoice(choice, blockedPath, cwd);
+                  } else if (isDeniedByDenyRead || !isReadAllowed) {
+                    const choice = await promptReadBlock(
+                      ctx,
+                      blockedPath,
+                      isDeniedByDenyRead ? 'granting allowRead will override it' : undefined,
+                    );
+                    if (choice !== 'abort') await applyReadChoice(choice, blockedPath, cwd);
+                  } else if (!isWriteAllowed) {
+                    const choice = await promptWriteBlock(ctx, blockedPath);
+                    if (choice !== 'abort') await applyWriteChoice(choice, blockedPath, cwd);
+                  }
+                } else if (!blockedPath && ctx.hasUI) {
+                  const landstripErrors = parseLandstripTraps(errorOutput);
+                  if (landstripErrors.length > 0) {
+                    const formatted = formatLandstripTraps(landstripErrors);
+                    notify(ctx, `Sandbox blocked an operation: ${formatted}`, 'warning');
+                  }
+                }
+
+                resolvePromise({ exitCode: code });
+              })().catch(reject);
             });
           })().catch(reject);
         });
