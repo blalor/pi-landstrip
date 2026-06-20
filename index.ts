@@ -106,7 +106,7 @@ interface LandstripBashCallbacks {
   promptOnBlock?: boolean;
 }
 
-const LANDSTRIP_VERSION = [0, 15, 9] as const;
+const LANDSTRIP_VERSION = [0, 16, 4] as const;
 const REQUIRED_LANDSTRIP_VERSION = LANDSTRIP_VERSION.join('.');
 const SUPPORTED_PLATFORMS = new Set<NodeJS.Platform>(['linux', 'darwin', 'win32']);
 
@@ -1197,7 +1197,6 @@ export function createLandstripIntegration(
             let timedOut = false;
             let cleaned = false;
 
-            // Create socketpair for bidirectional query-response on fd 3.
             const [trapSocket, childEnd] = await createSocketPair();
 
             const cleanup = () => {
