@@ -572,8 +572,9 @@ function notify(ctx: ExtensionContext, message: string, level: NotificationLevel
 }
 
 function hasTuiStatus(ctx: ExtensionContext): boolean {
-  const { mode } = ctx as ExtensionContext & { mode?: string };
-  return mode === undefined ? ctx.hasUI : mode === 'tui';
+  if (!ctx.hasUI) return false;
+  const mode = 'mode' in ctx ? (ctx as Record<string, unknown>).mode : undefined;
+  return mode === undefined || mode === 'tui';
 }
 
 function setTuiStatus(ctx: ExtensionContext, key: string, value: string | undefined): void {
