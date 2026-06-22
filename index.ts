@@ -330,9 +330,8 @@ function allowsAllDomains(allowedDomains: string[]): boolean {
 function shouldPromptForWrite(
   path: string,
   allowWrite: string[],
-  patternMatcher: (path: string, patterns: string[]) => boolean,
 ): boolean {
-  return allowWrite.length === 0 || !patternMatcher(path, allowWrite);
+  return allowWrite.length === 0 || !matchesPattern(path, allowWrite);
 }
 
 function expandPath(filePath: string): string {
@@ -1294,7 +1293,6 @@ export function createLandstripIntegration(
                   const isWriteAllowed = !shouldPromptForWrite(
                     blockedPath,
                     getEffectiveAllowWrite(config),
-                    matchesPattern,
                   );
 
                   if (blockedWritePath === blockedPath && !isWriteAllowed) {
@@ -1366,7 +1364,7 @@ export function createLandstripIntegration(
         return null;
       }
 
-      if (shouldPromptForWrite(blockedPath, getEffectiveAllowWrite(config), matchesPattern)) {
+      if (shouldPromptForWrite(blockedPath, getEffectiveAllowWrite(config))) {
         const choice = await promptWriteBlock(ctx, blockedPath);
         if (choice === 'abort') return null;
         await applyWriteChoice(choice, blockedPath, ctx.cwd);
@@ -1682,7 +1680,7 @@ export function createLandstripIntegration(
           };
         }
 
-        if (shouldPromptForWrite(filePath, getEffectiveAllowWrite(config), matchesPattern)) {
+        if (shouldPromptForWrite(filePath, getEffectiveAllowWrite(config))) {
           const choice = await promptWriteBlock(ctx, filePath);
           if (choice === 'abort') {
             return {
