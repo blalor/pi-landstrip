@@ -1,19 +1,8 @@
 // SPDX-License-Identifier: MIT
 // Copyright (C) Jarkko Sakkinen 2026
 
-import type {
-  AgentToolResult,
-  AgentToolUpdateCallback,
-  BashToolDetails,
-  BashToolInput,
-  ExtensionAPI,
-  ExtensionContext,
-  Theme,
-} from '@earendil-works/pi-coding-agent';
-
-import { binaryPath } from '@landstrip/landstrip';
-
 import { spawn, spawnSync } from 'node:child_process';
+import { randomBytes } from 'node:crypto';
 import {
   existsSync,
   mkdirSync,
@@ -34,6 +23,16 @@ import { homedir, tmpdir } from 'node:os';
 import { basename, dirname, isAbsolute, join, resolve } from 'node:path';
 import { URL } from 'node:url';
 
+import type {
+  AgentToolResult,
+  AgentToolUpdateCallback,
+  BashToolDetails,
+  BashToolInput,
+  ExtensionAPI,
+  ExtensionContext,
+  Theme,
+} from '@earendil-works/pi-coding-agent';
+
 import {
   type BashOperations,
   createBashToolDefinition,
@@ -44,7 +43,7 @@ import {
   withFileMutationQueue,
 } from '@earendil-works/pi-coding-agent';
 import { Key, matchesKey, truncateToWidth, visibleWidth } from '@earendil-works/pi-tui';
-import { randomBytes } from 'node:crypto';
+import { binaryPath } from '@landstrip/landstrip';
 
 interface SandboxFilesystemConfig {
   denyRead: string[];
