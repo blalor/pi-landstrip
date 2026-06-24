@@ -2,7 +2,6 @@
 // Copyright (C) Jarkko Sakkinen 2026
 
 import { spawn, spawnSync } from 'node:child_process';
-import { randomBytes } from 'node:crypto';
 import {
   existsSync,
   mkdirSync,
@@ -1154,27 +1153,22 @@ export function createLandstripIntegration(
 
   function createSocketPair(): Promise<[NetSocket, NetSocket]> {
     return new Promise((resolve, reject) => {
-      const sockPath = join(tmpdir(), `.landstrip-sock-${randomBytes(8).toString('hex')}`);
       const server = createServer();
       server.on('error', reject);
       let client: NetSocket | null = null;
       server.on('connection', (serverEnd) => {
         server.removeListener('error', reject);
         server.close();
-        try {
-          rmSync(sockPath, { force: true });
-        } catch {
-          /* ok */
-        }
         if (client) {
           client.removeListener('error', reject);
           resolve([client, serverEnd]);
         }
       });
-      server.listen(sockPath, () => {
+      server.listen(0, '127.0.0.1', () => {
+        const addr = server.address() as AddressInfo;
         client = new NetSocket();
         client.on('error', reject);
-        client.connect(sockPath);
+        client.connect(addr.port, '127.0.0.1');
       });
     });
   }
