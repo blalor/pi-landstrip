@@ -70,6 +70,25 @@ are limited to the project and `/dev/null`.
 
 Use `/sandbox` inside pi to show the active config and toggle sandboxing.
 
+## Audit logging
+
+Audit logging is disabled by default. Enable it with sandbox config:
+
+```json
+{
+  "audit": {
+    "enabled": true,
+    "logPath": "~/.pi/agent/sandbox-audit.jsonl",
+    "includeCommands": false
+  }
+}
+```
+
+You can also set `PI_LANDSTRIP_AUDIT_LOG=/path/to/audit.jsonl` for temporary
+logging. Audit entries are JSON Lines and include sandbox decisions such as bash
+start/end and filesystem prompt decisions. Commands are omitted unless
+`includeCommands` is true.
+
 ## License
 
 `pi-landstrip` is licensed under `MIT`. See [LICENSE](LICENSE) for more

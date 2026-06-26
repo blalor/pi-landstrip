@@ -10,6 +10,7 @@ import {
   realpathSync,
   rmSync,
   writeFileSync,
+  appendFileSync,
 } from 'node:fs';
 import {
   type AddressInfo,
@@ -61,19 +62,28 @@ interface SandboxNetworkConfig {
   deniedDomains: string[];
 }
 
+interface SandboxAuditConfig {
+  enabled: boolean;
+  logPath?: string;
+  includeCommands: boolean;
+}
+
 interface SandboxConfig {
   enabled: boolean;
   network: SandboxNetworkConfig;
   filesystem: SandboxFilesystemConfig;
+  audit: SandboxAuditConfig;
 }
 
 type SandboxFilesystemConfigFile = Partial<SandboxFilesystemConfig>;
 type SandboxNetworkConfigFile = Partial<SandboxNetworkConfig>;
+type SandboxAuditConfigFile = Partial<SandboxAuditConfig>;
 
 interface SandboxConfigFile {
   enabled?: boolean;
   network?: SandboxNetworkConfigFile;
   filesystem?: SandboxFilesystemConfigFile;
+  audit?: SandboxAuditConfigFile;
 }
 
 type SandboxConfigScope = 'global' | 'project';
@@ -196,6 +206,11 @@ function deepMerge(base: SandboxConfig, overrides: SandboxConfigFile): SandboxCo
       allowRead: mergeArray(base.filesystem.allowRead, filesystem?.allowRead),
       allowWrite: mergeArray(base.filesystem.allowWrite, filesystem?.allowWrite),
       denyWrite: mergeArray(base.filesystem.denyWrite, filesystem?.denyWrite),
+    },
+    audit: {
+      enabled: overrides.audit?.enabled ?? base.audit.enabled,
+      logPath: overrides.audit?.logPath ?? base.audit.logPath,
+      includeCommands: overrides.audit?.includeCommands ?? base.audit.includeCommands,
     },
   };
 }
@@ -558,6 +573,29 @@ function formatLandstripTraps(traps: LandstripTrap[]): string {
 function notify(ctx: ExtensionContext, message: string, level: NotificationLevel): void {
   if (!ctx.hasUI) return;
   ctx.ui.notify(message, level);
+}
+
+function auditEvent(cwd: string, event: string, details: Record<string, unknown> = {}): void {
+  const config = loadConfig(cwd);
+  const envPath = process.env.PI_LANDSTRIP_AUDIT_LOG;
+  const logPath = envPath || config.audit.logPath;
+  if (!logPath || (!envPath && !config.audit.enabled)) return;
+
+  const safeDetails = { ...details };
+  if (!config.audit.includeCommands) delete safeDetails.command;
+
+  const line = JSON.stringify({
+    ts: new Date().toISOString(),
+    event,
+    cwd,
+    ...safeDetails,
+  });
+
+  try {
+    appendFileSync(expandPath(logPath), line + '\n', 'utf8');
+  } catch (error) {
+    console.error(`Warning: Could not write sandbox audit log ${logPath}: ${error}`);
+  }
 }
 
 function hasTuiStatus(ctx: ExtensionContext): boolean {
@@ -1175,6 +1213,7 @@ export function createLandstripIntegration(
   ): BashOperations {
     return {
       async exec(command, cwd, { onData, signal, timeout, env }) {
+        auditEvent(cwd, 'bash.start', { command, timeout });
         if (!existsSync(cwd)) throw new Error(`Working directory does not exist: ${cwd}`);
 
         const { shell, args } = getShellConfig(SettingsManager.create(cwd).getShellPath());
@@ -1268,6 +1307,7 @@ export function createLandstripIntegration(
               rawPath: string,
               rawLine: string,
             ): void => {
+              auditEvent(cwd, 'filesystem.query', { queryId, operation, path: rawPath });
               const path = normalizeBlockedPath(rawPath, cwd);
               const config = loadConfig(cwd);
               const isAllowed = (cfg: SandboxConfig): boolean =>
@@ -1312,11 +1352,24 @@ export function createLandstripIntegration(
                         )
                       : await promptWriteBlock(ctx, path);
                   if (choice === 'abort') {
+                    auditEvent(cwd, 'filesystem.decision', {
+                      queryId,
+                      operation,
+                      path,
+                      action: 'deny',
+                    });
                     respondQuery(queryId, 'deny');
                     return;
                   }
                   if (operation === 'read') await applyReadChoice(choice, path, cwd);
                   else await applyWriteChoice(choice, path, cwd);
+                  auditEvent(cwd, 'filesystem.decision', {
+                    queryId,
+                    operation,
+                    path,
+                    action: 'allow',
+                    scope: choice,
+                  });
                   respondQuery(queryId, 'allow');
                 })
                 .catch(() => respondQuery(queryId, 'deny'));
@@ -1362,6 +1415,7 @@ export function createLandstripIntegration(
             child.on('close', (code) => {
               void (async () => {
                 cleanup();
+                auditEvent(cwd, 'bash.end', { command, exitCode: code, timedOut });
                 if (signal?.aborted) {
                   reject(new Error('aborted'));
                   return;
