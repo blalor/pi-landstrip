@@ -989,13 +989,19 @@ export function createLandstripIntegration(
     return { dir, path };
   }
 
-  function startProxy(cwd: string): Promise<{ port: number; stop: () => Promise<void> }> {
+  function startProxy(
+    ctx: ExtensionContext,
+    cwd: string,
+    promptOnBlock: boolean,
+  ): Promise<{ port: number; stop: () => Promise<void> }> {
     const sockets = new Set<Socket>();
 
-    function domainAllowed(domain: string): boolean {
+    async function domainAllowed(domain: string): Promise<boolean> {
       const config = loadConfig(cwd);
       if (domainMatchesAny(domain, config.network.deniedDomains)) return false;
-      return domainMatchesAny(domain, getEffectiveAllowedDomains(config));
+      if (domainMatchesAny(domain, getEffectiveAllowedDomains(config))) return true;
+      if (!promptOnBlock || !ctx.hasUI) return false;
+      return ensureDomainAllowed(ctx, domain, cwd);
     }
 
     async function handleConnect(client: Socket, target: string, rest: Buffer): Promise<void> {
@@ -1005,7 +1011,7 @@ export function createLandstripIntegration(
         return;
       }
 
-      if (!domainAllowed(endpoint.host)) {
+      if (!(await domainAllowed(endpoint.host))) {
         denyProxyRequest(client);
         return;
       }
@@ -1053,7 +1059,7 @@ export function createLandstripIntegration(
         }
       }
 
-      if (!domainAllowed(url.hostname)) {
+      if (!(await domainAllowed(url.hostname))) {
         denyProxyRequest(client);
         return;
       }
@@ -1174,7 +1180,9 @@ export function createLandstripIntegration(
         const { shell, args } = getShellConfig(SettingsManager.create(cwd).getShellPath());
         const config = loadConfig(cwd);
         const allowNetwork = config.network.allowNetwork;
-        const proxy = allowNetwork ? null : await startProxy(cwd);
+        const proxy = allowNetwork
+          ? null
+          : await startProxy(ctx, cwd, callbacks.promptOnBlock ?? false);
         const policy = writePolicyFile(cwd, proxy?.port ?? null);
         const landstripArgs = ['--trap-fd', '3', '-p', policy.path, shell, ...args, command];
 
@@ -1404,6 +1412,7 @@ export function createLandstripIntegration(
         onStderr: (data) => {
           stderrOutput += data.toString('utf8');
         },
+        promptOnBlock: true,
       }),
       shellPath: SettingsManager.create(ctx.cwd).getShellPath(),
     });
