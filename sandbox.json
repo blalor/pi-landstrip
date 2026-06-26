@@ -8,6 +8,10 @@
     "allowedDomains": [],
     "deniedDomains": []
   },
+  "audit": {
+    "enabled": false,
+    "includeCommands": false
+  },
   "filesystem": {
     "denyRead": ["/Users", "/home"],
     "allowRead": [".", "~/.gitconfig", "~/.config/git/config", "/dev/null"],
