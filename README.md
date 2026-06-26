@@ -89,6 +89,28 @@ logging. Audit entries are JSON Lines and include sandbox decisions such as bash
 start/end and filesystem prompt decisions. Commands are omitted unless
 `includeCommands` is true.
 
+## Command bypass rules
+
+Some tools need OS services that landstrip cannot currently model, such as
+macOS Keychain access. You can opt specific commands out of sandboxing:
+
+```json
+{
+  "bypass": {
+    "commands": [
+      {
+        "name": "acli auth status",
+        "exact": "acli auth status",
+        "reason": "Requires macOS Keychain access"
+      }
+    ]
+  }
+}
+```
+
+Rules can use `exact` or an anchored `regex`. Prefer exact matches. Avoid broad
+rules such as `^acli .*`; bypassed commands run with normal host permissions.
+
 ## License
 
 `pi-landstrip` is licensed under `MIT`. See [LICENSE](LICENSE) for more
