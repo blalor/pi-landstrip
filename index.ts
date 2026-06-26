@@ -36,6 +36,7 @@ import type {
 import {
   type BashOperations,
   createBashToolDefinition,
+  createLocalBashOperations,
   getAgentDir,
   getShellConfig,
   isToolCallEventType,
@@ -61,19 +62,33 @@ interface SandboxNetworkConfig {
   deniedDomains: string[];
 }
 
+interface SandboxBypassCommandConfig {
+  name?: string;
+  exact?: string;
+  regex?: string;
+  reason?: string;
+}
+
+interface SandboxBypassConfig {
+  commands: SandboxBypassCommandConfig[];
+}
+
 interface SandboxConfig {
   enabled: boolean;
   network: SandboxNetworkConfig;
   filesystem: SandboxFilesystemConfig;
+  bypass: SandboxBypassConfig;
 }
 
 type SandboxFilesystemConfigFile = Partial<SandboxFilesystemConfig>;
 type SandboxNetworkConfigFile = Partial<SandboxNetworkConfig>;
+type SandboxBypassConfigFile = Partial<SandboxBypassConfig>;
 
 interface SandboxConfigFile {
   enabled?: boolean;
   network?: SandboxNetworkConfigFile;
   filesystem?: SandboxFilesystemConfigFile;
+  bypass?: SandboxBypassConfigFile;
 }
 
 type SandboxConfigScope = 'global' | 'project';
@@ -196,6 +211,9 @@ function deepMerge(base: SandboxConfig, overrides: SandboxConfigFile): SandboxCo
       allowRead: mergeArray(base.filesystem.allowRead, filesystem?.allowRead),
       allowWrite: mergeArray(base.filesystem.allowWrite, filesystem?.allowWrite),
       denyWrite: mergeArray(base.filesystem.denyWrite, filesystem?.denyWrite),
+    },
+    bypass: {
+      commands: [...base.bypass.commands, ...(overrides.bypass?.commands ?? [])],
     },
   };
 }
@@ -558,6 +576,31 @@ function formatLandstripTraps(traps: LandstripTrap[]): string {
 function notify(ctx: ExtensionContext, message: string, level: NotificationLevel): void {
   if (!ctx.hasUI) return;
   ctx.ui.notify(message, level);
+}
+
+function findBypassCommandRule(command: string, cwd: string): SandboxBypassCommandConfig | null {
+  const config = loadConfig(cwd);
+  for (const rule of config.bypass.commands) {
+    if (rule.exact !== undefined && command === rule.exact) return rule;
+    if (rule.regex !== undefined) {
+      try {
+        if (new RegExp(rule.regex).test(command)) return rule;
+      } catch {
+        // Ignore invalid user-supplied bypass regexes fail-closed.
+      }
+    }
+  }
+  return null;
+}
+
+function notifyBypass(
+  ctx: ExtensionContext,
+  command: string,
+  rule: SandboxBypassCommandConfig,
+): void {
+  const label = rule.name ?? rule.exact ?? rule.regex ?? command;
+  const reason = rule.reason ? `\nReason: ${rule.reason}` : '';
+  notify(ctx, `Sandbox bypassed for approved command: ${label}${reason}`, 'warning');
 }
 
 function hasTuiStatus(ctx: ExtensionContext): boolean {
@@ -1655,6 +1698,12 @@ export function createLandstripIntegration(
         if (!effectiveCtx || !ensureSandboxState(effectiveCtx))
           return localBash.execute(id, params, signal, onUpdate, effectiveCtx);
 
+        const bypassRule = findBypassCommandRule(params.command, effectiveCtx.cwd);
+        if (bypassRule) {
+          notifyBypass(effectiveCtx, params.command, bypassRule);
+          return localBash.execute(id, params, signal, onUpdate, effectiveCtx);
+        }
+
         return runBashWithOptionalRetry(id, params, signal, onUpdate, effectiveCtx);
       },
     };
@@ -1677,6 +1726,12 @@ export function createLandstripIntegration(
 
     pi.on('user_bash', async (event, ctx) => {
       if (!ensureSandboxState(ctx)) return;
+      const bypassRule = findBypassCommandRule(event.command, ctx.cwd);
+      if (bypassRule) {
+        notifyBypass(ctx, event.command, bypassRule);
+        return { operations: createLocalBashOperations() };
+      }
+
       const config = loadConfig(ctx.cwd);
 
       if (!config.network.allowNetwork) {
@@ -1704,6 +1759,7 @@ export function createLandstripIntegration(
       const { globalPath, projectPath } = getConfigPaths(ctx.cwd);
 
       if (sandboxReady && isToolCallEventType('bash', event)) {
+        if (findBypassCommandRule(event.input.command, ctx.cwd)) return;
         if (!config.network.allowNetwork) {
           const blockedDomain = await preflightCommandDomains(event.input.command, ctx);
           if (blockedDomain) {

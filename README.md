@@ -53,8 +53,7 @@ config when present, otherwise the global config.
 
 When pi asks for a sandboxed permission, the extension emits a host
 notification. After that the extension opens a dialog with the choices to allow
-once, allow for the session, persist for the project, persist globally, or
-reject. The dialog shows the exact path or domain being approved.
+for the session, persist for the project, persist globally, or reject. The dialog shows the exact path or domain being approved.
 
 Project approvals are written to `.pi/sandbox.json`; global approvals are
 written to `~/.pi/agent/sandbox.json`.
@@ -69,6 +68,28 @@ is off unless domains are allowed, reads are limited to the project,
 `/dev/null`.
 
 Use `/sandbox` inside pi to show the active config and toggle sandboxing.
+
+## Command bypass rules
+
+Some tools need OS services that landstrip cannot currently model, such as
+macOS Keychain access. You can opt specific commands out of sandboxing:
+
+```json
+{
+  "bypass": {
+    "commands": [
+      {
+        "name": "acli auth status",
+        "exact": "acli auth status",
+        "reason": "Requires macOS Keychain access"
+      }
+    ]
+  }
+}
+```
+
+Rules can use `exact` or an anchored `regex`. Prefer exact matches. Avoid broad
+rules such as `^acli .*`; bypassed commands run with normal host permissions.
 
 ## License
 
