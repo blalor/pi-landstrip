@@ -53,8 +53,7 @@ config when present, otherwise the global config.
 
 When pi asks for a sandboxed permission, the extension emits a host
 notification. After that the extension opens a dialog with the choices to allow
-once, allow for the session, persist for the project, persist globally, or
-reject. The dialog shows the exact path or domain being approved.
+for the session, persist for the project, persist globally, or reject. The dialog shows the exact path or domain being approved.
 
 Project approvals are written to `.pi/sandbox.json`; global approvals are
 written to `~/.pi/agent/sandbox.json`.
@@ -69,6 +68,25 @@ is off unless domains are allowed, reads are limited to the project,
 `/dev/null`.
 
 Use `/sandbox` inside pi to show the active config and toggle sandboxing.
+
+## Audit logging
+
+Audit logging is disabled by default. Enable it with sandbox config:
+
+```json
+{
+  "audit": {
+    "enabled": true,
+    "logPath": "~/.pi/agent/sandbox-audit.jsonl",
+    "includeCommands": false
+  }
+}
+```
+
+You can also set `PI_LANDSTRIP_AUDIT_LOG=/path/to/audit.jsonl` for temporary
+logging. Audit entries are JSON Lines and include sandbox decisions such as bash
+start/end and filesystem prompt decisions. Commands are omitted unless
+`includeCommands` is true.
 
 ## License
 
