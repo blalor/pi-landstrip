@@ -6,7 +6,8 @@
     "strict": true,
     "skipLibCheck": true,
     "noEmit": true,
+    "allowImportingTsExtensions": true,
     "types": ["node"]
   },
-  "include": ["index.ts", "landstrip.d.ts"]
+  "include": ["index.ts", "index.test.ts", "landstrip.d.ts"]
 }

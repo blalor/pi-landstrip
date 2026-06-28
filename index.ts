@@ -314,16 +314,21 @@ function allowsAllDomains(allowedDomains: string[]): boolean {
   return allowedDomains.includes('*');
 }
 
-function shouldPromptForWrite(path: string, allowWrite: string[]): boolean {
-  return allowWrite.length === 0 || !matchesPattern(path, allowWrite);
+export function shouldPromptForWrite(path: string, allowWrite: string[], cwd: string): boolean {
+  return allowWrite.length === 0 || !matchesPattern(path, allowWrite, cwd);
 }
 
-function expandPath(filePath: string): string {
-  return resolve(filePath.replace(/^~(?=$|\/)/, homedir()));
+// Relative entries (notably ".") resolve against `cwd` — the command's working
+// directory that landstrip itself uses as its policy base — not the extension
+// process's own cwd. Resolving against process.cwd() would let the broker's
+// allow/deny decision diverge from landstrip's whenever the agent operates
+// outside the directory pi was launched from.
+function expandPath(filePath: string, cwd: string): string {
+  return resolve(cwd, filePath.replace(/^~(?=$|\/)/, homedir()));
 }
 
-function canonicalizePath(filePath: string): string {
-  const abs = expandPath(filePath);
+function canonicalizePath(filePath: string, cwd: string): string {
+  const abs = expandPath(filePath, cwd);
 
   try {
     return realpathSync.native(abs);
@@ -346,11 +351,13 @@ function canonicalizePath(filePath: string): string {
   }
 }
 
-function matchesPattern(filePath: string, patterns: string[]): boolean {
-  const abs = canonicalizePath(filePath);
+export function matchesPattern(filePath: string, patterns: string[], cwd: string): boolean {
+  const abs = canonicalizePath(filePath, cwd);
 
   return patterns.some((pattern) => {
-    const absPattern = pattern.includes('*') ? expandPath(pattern) : canonicalizePath(pattern);
+    const absPattern = pattern.includes('*')
+      ? expandPath(pattern, cwd)
+      : canonicalizePath(pattern, cwd);
 
     if (pattern.includes('*')) {
       const escaped = absPattern
@@ -365,7 +372,7 @@ function matchesPattern(filePath: string, patterns: string[]): boolean {
 }
 
 function normalizeBlockedPath(path: string, cwd: string): string {
-  return canonicalizePath(isAbsolute(path) ? path : join(cwd, path));
+  return canonicalizePath(isAbsolute(path) ? path : join(cwd, path), cwd);
 }
 
 function isPathLike(value: string): boolean {
@@ -1248,10 +1255,10 @@ export function createLandstripIntegration(
               const config = loadConfig(cwd);
               const isAllowed = (cfg: SandboxConfig): boolean =>
                 operation === 'read'
-                  ? !matchesPattern(path, cfg.filesystem.denyRead) &&
-                    matchesPattern(path, getEffectiveAllowRead(cfg))
-                  : !matchesPattern(path, cfg.filesystem.denyWrite) &&
-                    !shouldPromptForWrite(path, getEffectiveAllowWrite(cfg));
+                  ? !matchesPattern(path, cfg.filesystem.denyRead, cwd) &&
+                    matchesPattern(path, getEffectiveAllowRead(cfg), cwd)
+                  : !matchesPattern(path, cfg.filesystem.denyWrite, cwd) &&
+                    !shouldPromptForWrite(path, getEffectiveAllowWrite(cfg), cwd);
 
               if (isAllowed(config)) {
                 respondQuery(queryId, 'allow');
@@ -1264,7 +1271,7 @@ export function createLandstripIntegration(
                 return;
               }
               // denyWrite is a hard block: never prompt to override it.
-              if (operation === 'write' && matchesPattern(path, config.filesystem.denyWrite)) {
+              if (operation === 'write' && matchesPattern(path, config.filesystem.denyWrite, cwd)) {
                 respondQuery(queryId, 'deny');
                 return;
               }
@@ -1282,7 +1289,7 @@ export function createLandstripIntegration(
                       ? await promptReadBlock(
                           ctx,
                           path,
-                          matchesPattern(path, cfg.filesystem.denyRead)
+                          matchesPattern(path, cfg.filesystem.denyRead, cwd)
                             ? 'granting allowRead will override it'
                             : undefined,
                         )
@@ -1400,7 +1407,7 @@ export function createLandstripIntegration(
 
       let config = loadConfig(ctx.cwd);
       const { globalPath, projectPath } = getConfigPaths(ctx.cwd);
-      if (matchesPattern(blockedPath, config.filesystem.denyWrite)) {
+      if (matchesPattern(blockedPath, config.filesystem.denyWrite, ctx.cwd)) {
         notify(
           ctx,
           `"${blockedPath}" is blocked by denyWrite. Check:\n  ${projectPath}\n  ${globalPath}`,
@@ -1409,14 +1416,14 @@ export function createLandstripIntegration(
         return null;
       }
 
-      if (shouldPromptForWrite(blockedPath, getEffectiveAllowWrite(config))) {
+      if (shouldPromptForWrite(blockedPath, getEffectiveAllowWrite(config), ctx.cwd)) {
         const choice = await promptWriteBlock(ctx, blockedPath);
         if (choice === 'abort') return null;
         await applyWriteChoice(choice, blockedPath, ctx.cwd);
       }
 
       config = loadConfig(ctx.cwd);
-      if (matchesPattern(blockedPath, config.filesystem.denyWrite)) {
+      if (matchesPattern(blockedPath, config.filesystem.denyWrite, ctx.cwd)) {
         notify(
           ctx,
           `"${blockedPath}" was added to allowWrite, but denyWrite still blocks it. Check:\n  ${projectPath}\n  ${globalPath}`,
@@ -1442,11 +1449,11 @@ export function createLandstripIntegration(
       if (!ctx.hasUI) return null;
 
       const config = loadConfig(ctx.cwd);
-      if (!matchesPattern(blockedPath, getEffectiveAllowRead(config))) {
+      if (!matchesPattern(blockedPath, getEffectiveAllowRead(config), ctx.cwd)) {
         const choice = await promptReadBlock(
           ctx,
           blockedPath,
-          matchesPattern(blockedPath, config.filesystem.denyRead)
+          matchesPattern(blockedPath, config.filesystem.denyRead, ctx.cwd)
             ? 'granting allowRead will override it'
             : undefined,
         );
@@ -1688,8 +1695,8 @@ export function createLandstripIntegration(
       }
 
       if (isToolCallEventType('read', event)) {
-        const filePath = canonicalizePath(event.input.path);
-        if (!matchesPattern(filePath, getEffectiveAllowRead(config))) {
+        const filePath = canonicalizePath(event.input.path, ctx.cwd);
+        if (!matchesPattern(filePath, getEffectiveAllowRead(config), ctx.cwd)) {
           const choice = await promptReadBlock(ctx, filePath);
           if (choice === 'abort') {
             return {
@@ -1702,9 +1709,9 @@ export function createLandstripIntegration(
       }
 
       if (isToolCallEventType('write', event) || isToolCallEventType('edit', event)) {
-        const filePath = canonicalizePath((event.input as { path: string }).path);
+        const filePath = canonicalizePath((event.input as { path: string }).path, ctx.cwd);
 
-        if (matchesPattern(filePath, config.filesystem.denyWrite)) {
+        if (matchesPattern(filePath, config.filesystem.denyWrite, ctx.cwd)) {
           return {
             block: true,
             reason:
@@ -1713,7 +1720,7 @@ export function createLandstripIntegration(
           };
         }
 
-        if (shouldPromptForWrite(filePath, getEffectiveAllowWrite(config))) {
+        if (shouldPromptForWrite(filePath, getEffectiveAllowWrite(config), ctx.cwd)) {
           const choice = await promptWriteBlock(ctx, filePath);
           if (choice === 'abort') {
             return {
