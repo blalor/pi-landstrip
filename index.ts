@@ -77,6 +77,8 @@ interface SandboxConfigFile {
 }
 
 type SandboxConfigScope = 'global' | 'project';
+export type SandboxDisableReason = 'flag' | 'session';
+export type SandboxSessionCommand = 'enable' | 'disable' | 'toggle';
 
 interface LandstripPolicy {
   network: {
@@ -316,6 +318,26 @@ function allowsAllDomains(allowedDomains: string[]): boolean {
 
 export function shouldPromptForWrite(path: string, allowWrite: string[], cwd: string): boolean {
   return allowWrite.length === 0 || !matchesPattern(path, allowWrite, cwd);
+}
+
+export function getSandboxDisableReason(
+  noSandboxFlag: boolean,
+  sessionSandboxDisabled: boolean,
+): SandboxDisableReason | null {
+  if (noSandboxFlag) return 'flag';
+  if (sessionSandboxDisabled) return 'session';
+  return null;
+}
+
+export function parseSandboxSessionCommand(args: string): SandboxSessionCommand | null {
+  const normalized = args.trim().toLowerCase().replace(/\s+/g, ' ');
+  if (!normalized) return null;
+
+  if (normalized === 'session toggle') return 'toggle';
+  if (normalized === 'session on' || normalized === 'session enable') return 'enable';
+  if (normalized === 'session off' || normalized === 'session disable') return 'disable';
+
+  return null;
 }
 
 // Relative entries (notably ".") resolve against `cwd` — the command's working
@@ -1601,21 +1623,35 @@ export function createLandstripIntegration(
   }
 
   let noSandboxFlag = false;
-  function disableSandbox(ctx: ExtensionContext): void {
+  let sessionSandboxDisabled = false;
+
+  function setDisabledStatus(ctx: ExtensionContext, reason: string): void {
+    if (!hasTuiStatus(ctx)) return;
+    const theme = ctx.ui.theme;
+    const dot = theme.fg('warning', '●');
+    const label = theme.fg('text', 'Sandbox');
+    const sep = theme.fg('dim', '·');
+    const disabled = theme.fg('warning', `disabled: ${reason}`);
+    setTuiStatus(ctx, 'sandbox', `${dot} ${label}  ${sep}  ${disabled}`);
+  }
+
+  function disableSandbox(ctx: ExtensionContext, reason?: string): void {
     sandboxEnabled = false;
     sandboxReady = false;
-    setTuiStatus(ctx, 'sandbox', undefined);
+    if (reason) setDisabledStatus(ctx, reason);
+    else setTuiStatus(ctx, 'sandbox', undefined);
   }
 
   function ensureSandboxState(ctx: ExtensionContext): boolean {
-    if (noSandboxFlag) {
-      disableSandbox(ctx);
+    const disabledReason = getSandboxDisableReason(noSandboxFlag, sessionSandboxDisabled);
+    if (disabledReason) {
+      disableSandbox(ctx, disabledReason === 'flag' ? '--no-sandbox' : 'session');
       return false;
     }
 
     const config = loadConfig(ctx.cwd);
     if (!config.enabled) {
-      disableSandbox(ctx);
+      disableSandbox(ctx, 'config');
       return false;
     }
 
@@ -1735,17 +1771,18 @@ export function createLandstripIntegration(
 
     pi.on('session_start', async (_event, ctx) => {
       resetSessionAllowances();
+      sessionSandboxDisabled = false;
       noSandboxFlag = Boolean(maybePi.getFlag?.('no-sandbox'));
 
       if (noSandboxFlag) {
-        disableSandbox(ctx);
+        disableSandbox(ctx, '--no-sandbox');
         notify(ctx, 'Sandbox disabled via --no-sandbox', 'warning');
         return;
       }
 
       const config = loadConfig(ctx.cwd);
       if (!config.enabled) {
-        disableSandbox(ctx);
+        disableSandbox(ctx, 'config');
         notify(ctx, 'Sandbox disabled via config', 'info');
         return;
       }
@@ -1754,7 +1791,35 @@ export function createLandstripIntegration(
     });
     maybePi.registerCommand?.('sandbox', {
       description: 'Show sandbox configuration',
-      handler: async (_args, ctx) => {
+      handler: async (args, ctx) => {
+        const sessionCommand = parseSandboxSessionCommand(args);
+        if (sessionCommand) {
+          sessionSandboxDisabled =
+            sessionCommand === 'toggle' ? !sessionSandboxDisabled : sessionCommand === 'disable';
+
+          if (sessionSandboxDisabled) {
+            disableSandbox(ctx, 'session');
+            notify(ctx, 'Sandbox disabled for this session', 'warning');
+            return;
+          }
+
+          if (noSandboxFlag) {
+            disableSandbox(ctx, '--no-sandbox');
+            notify(ctx, 'Sandbox remains disabled via --no-sandbox', 'warning');
+            return;
+          }
+
+          const currentConfig = loadConfig(ctx.cwd);
+          if (!currentConfig.enabled) {
+            disableSandbox(ctx, 'config');
+            notify(ctx, 'Sandbox remains disabled via config', 'info');
+            return;
+          }
+
+          if (enableSandbox(ctx)) notify(ctx, 'Sandbox enabled for this session', 'info');
+          return;
+        }
+
         let config = loadConfig(ctx.cwd);
 
         const { globalPath, projectPath } = getConfigPaths(ctx.cwd);
@@ -1769,6 +1834,7 @@ export function createLandstripIntegration(
 
             function sandboxStatus(): { color: 'success' | 'warning'; label: string } {
               if (noSandboxFlag) return { color: 'warning', label: 'Disabled (--no-sandbox)' };
+              if (sessionSandboxDisabled) return { color: 'warning', label: 'Disabled (session)' };
               if (!config.enabled) return { color: 'warning', label: 'Disabled' };
               if (!sandboxEnabled || !sandboxReady) return { color: 'warning', label: 'Inactive' };
               return { color: 'success', label: 'Active' };
@@ -1787,6 +1853,9 @@ export function createLandstripIntegration(
                 const toggleValue = config.enabled
                   ? theme.fg('success', 'enabled')
                   : theme.fg('warning', 'disabled');
+                const sessionValue = sessionSandboxDisabled
+                  ? theme.fg('warning', 'disabled')
+                  : theme.fg('success', 'enabled');
 
                 function section(titleText: string, detail?: string): void {
                   lines.push(row(''));
@@ -1808,7 +1877,7 @@ export function createLandstripIntegration(
                 const pathSnippet = text(truncateToWidth(binaryPath(), Math.max(20, innerW - 28)));
                 lines.push(
                   row(
-                    `${statusDot} ${text(status.label)} ${dim('·')} persisted ${toggleValue} ${dim('·')} ${muted('landstrip')} ${pathSnippet}`,
+                    `${statusDot} ${text(status.label)} ${dim('·')} session ${sessionValue} ${dim('·')} persisted ${toggleValue} ${dim('·')} ${muted('landstrip')} ${pathSnippet}`,
                   ),
                 );
 
@@ -1841,7 +1910,7 @@ export function createLandstripIntegration(
                 lines.push(row(''));
                 lines.push(
                   row(
-                    `${dim('t')} ${muted('toggle persisted setting')}  ${dim('esc')} ${muted('close')}`,
+                    `${dim('s')} ${muted('toggle session')}  ${dim('t')} ${muted('toggle persisted setting')}  ${dim('esc')} ${muted('close')}`,
                   ),
                 );
                 lines.push(boxBottom(theme, width));
@@ -1850,6 +1919,26 @@ export function createLandstripIntegration(
               },
 
               handleInput(data: string): void {
+                if (data === 's' || data === 'S') {
+                  sessionSandboxDisabled = !sessionSandboxDisabled;
+
+                  if (sessionSandboxDisabled) {
+                    disableSandbox(ctx, 'session');
+                    notify(ctx, 'Sandbox disabled for this session', 'warning');
+                  } else if (noSandboxFlag) {
+                    disableSandbox(ctx, '--no-sandbox');
+                    notify(ctx, 'Sandbox remains disabled via --no-sandbox', 'warning');
+                  } else if (!config.enabled) {
+                    disableSandbox(ctx, 'config');
+                    notify(ctx, 'Sandbox remains disabled via config', 'info');
+                  } else if (enableSandbox(ctx)) {
+                    notify(ctx, 'Sandbox enabled for this session', 'info');
+                  }
+
+                  tui.requestRender();
+                  return;
+                }
+
                 if (data !== 't' && data !== 'T') {
                   done(undefined);
                   return;
@@ -1861,11 +1950,16 @@ export function createLandstripIntegration(
                   config = loadConfig(ctx.cwd);
 
                   if (!enabled) {
-                    disableSandbox(ctx);
+                    disableSandbox(ctx, 'config');
                     notify(ctx, `Sandbox disabled in ${scope} config`, 'info');
                   } else if (noSandboxFlag) {
+                    disableSandbox(ctx, '--no-sandbox');
                     notify(ctx, 'Sandbox remains disabled via --no-sandbox', 'warning');
+                  } else if (sessionSandboxDisabled) {
+                    disableSandbox(ctx, 'session');
+                    notify(ctx, 'Sandbox remains disabled for this session', 'warning');
                   } else if (!config.enabled) {
+                    disableSandbox(ctx, 'config');
                     notify(ctx, 'Sandbox remains disabled via config', 'info');
                   } else if (enableSandbox(ctx)) {
                     notify(ctx, `Sandbox enabled in ${scope} config`, 'info');

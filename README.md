@@ -37,8 +37,12 @@ On unsupported platforms the extension loads but leaves sandboxing disabled.
 
 ## Disable
 
-Use the `--no-sandbox` flag, or set `enabled` to `false` in the sandbox
-config:
+Use the `--no-sandbox` flag to disable sandboxing for one Pi process. Inside
+an active session, use `/sandbox` and press `s`, or run `/sandbox session off`,
+to disable sandboxing for only that session without changing shared config.
+
+To persistently disable sandboxing for every Pi instance that reads the same
+config, set `enabled` to `false` in the sandbox config:
 
 ```json
 {
@@ -46,8 +50,8 @@ config:
 }
 ```
 
-Project config overrides global config. The `/sandbox` UI updates the project
-config when present, otherwise the global config.
+Project config overrides global config. The `/sandbox` UI's persisted toggle
+updates the project config when present, otherwise the global config.
 
 ## Behavior
 
@@ -68,7 +72,8 @@ is off unless domains are allowed, reads are limited to the project,
 `~/.gitconfig`, and `/dev/null`, and writes are limited to the project and
 `/dev/null`.
 
-Use `/sandbox` inside pi to show the active config and toggle sandboxing.
+Use `/sandbox` inside pi to show the active config. Press `s` to toggle the
+current session only, or `t` to toggle the persisted config.
 
 ## License
 
