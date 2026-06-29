@@ -53,8 +53,7 @@ config when present, otherwise the global config.
 
 When pi asks for a sandboxed permission, the extension emits a host
 notification. After that the extension opens a dialog with the choices to allow
-once, allow for the session, persist for the project, persist globally, or
-reject. The dialog shows the exact path or domain being approved.
+for the session, persist for the project, persist globally, or reject. The dialog shows the exact path or domain being approved.
 
 Project approvals are written to `.pi/sandbox.json`; global approvals are
 written to `~/.pi/agent/sandbox.json`.
@@ -62,11 +61,12 @@ written to `~/.pi/agent/sandbox.json`.
 When pi runs a bash command, the extension wraps it in `landstrip`. This
 applies to both the AI `bash` tool calls and manually typed shell-mode commands
 (`!` and `!!`). Network traffic is routed through an allowlist proxy when
-network access is off, and read/write tool access is blocked outside the
-configured filesystem allowlists. The default policy is strict: network access
-is off unless domains are allowed, reads are limited to the project,
-`~/.gitconfig`, and `/dev/null`, and writes are limited to the project and
-`/dev/null`.
+network access is off. If a command discovers a domain only at runtime, the
+proxy can prompt interactively before allowing or denying the connection.
+Read/write tool access is blocked outside the configured filesystem allowlists.
+The default policy is strict: network access is off unless domains are allowed,
+reads are limited to the project, `~/.gitconfig`, and `/dev/null`, and writes
+are limited to the project and `/dev/null`.
 
 Use `/sandbox` inside pi to show the active config and toggle sandboxing.
 
