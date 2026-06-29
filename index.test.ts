@@ -5,7 +5,12 @@ import { homedir } from 'node:os';
 import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
 
-import { matchesPattern, shouldPromptForWrite } from './index.ts';
+import {
+  getSandboxDisableReason,
+  matchesPattern,
+  parseSandboxSessionCommand,
+  shouldPromptForWrite,
+} from './index.ts';
 
 // The broker resolves relative policy entries (notably ".") against the command
 // `cwd` that landstrip uses as its policy base. Regression guard: before the fix
@@ -63,5 +68,26 @@ describe('shouldPromptForWrite', () => {
 
   it('prompts when allowWrite is empty', () => {
     expect(shouldPromptForWrite(`${PROJECT}/out.txt`, [], PROJECT)).toBe(true);
+  });
+});
+
+describe('session sandbox disable state', () => {
+  it('prefers the CLI flag over the session switch', () => {
+    expect(getSandboxDisableReason(true, false)).toBe('flag');
+    expect(getSandboxDisableReason(true, true)).toBe('flag');
+  });
+
+  it('uses the session switch without requiring persisted config changes', () => {
+    expect(getSandboxDisableReason(false, true)).toBe('session');
+    expect(getSandboxDisableReason(false, false)).toBeNull();
+  });
+
+  it('parses explicit session commands', () => {
+    expect(parseSandboxSessionCommand('session off')).toBe('disable');
+    expect(parseSandboxSessionCommand(' session   disable ')).toBe('disable');
+    expect(parseSandboxSessionCommand('session on')).toBe('enable');
+    expect(parseSandboxSessionCommand('session enable')).toBe('enable');
+    expect(parseSandboxSessionCommand('session toggle')).toBe('toggle');
+    expect(parseSandboxSessionCommand('off')).toBeNull();
   });
 });
